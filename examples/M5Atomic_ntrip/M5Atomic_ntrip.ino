@@ -7,13 +7,15 @@
 const char* ssid     = "SSID";
 const char* password = "pass";
 
-uint8_t baseCount=3;
+uint8_t baseCount=4;
 char* host[]={
   "rtk.toiso.fit",
   "rtk.toiso.fit",
-  "117.102.192.33"
+  "117.102.192.33",
+  "caster.agri-info-design.com"
 };
 int httpPort[]={
+  2101,
   2101,
   2101,
   2101
@@ -21,17 +23,20 @@ int httpPort[]={
 char* mntpnt[]={
   "eniwa-bd982cmr",
   "eniwa-f9p",
-  "ENIWA-K-F9P"
+  "ENIWA-K-F9P",
+  "00001122"
 };
 char* user[]={
   "",
   "",
-  ""
+  "",
+  "00001122"
 };
 char* passwd[]={
   "",
   "",
-  ""
+  "",
+  "pass"
 };
 
 NTRIPClient ntrip_c;
@@ -65,8 +70,13 @@ void setup() {
       case 2:
         setBuff(0x00, 0x00, 0x40);
       break;
+      case 3:
+        setBuff(0x00, 0x40, 0x40);
+      break;
+
       default:
-        break;
+      setBuff(0x00, 0x00, 0x00);
+      break;
 
     }
     M5.dis.displaybuff(DisBuff);
@@ -121,8 +131,8 @@ void loop() {
     Serial.print(",");
     Serial.print(user[FSM]);
     Serial.print(",");
-    Serial.print(passwd[FSM]);
-    Serial.print(",");
+   // Serial.print(passwd[FSM]);
+   // Serial.print(",");
     Serial.println(Count);
   delay(1000);
   M5.update();
