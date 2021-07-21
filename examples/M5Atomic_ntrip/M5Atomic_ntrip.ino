@@ -134,7 +134,7 @@ void loop()
     if (M5.Btn.wasPressed())
     {
         FSM++;
-        if (FSM >= 4)
+        if (FSM >= baseCount)
         {
             FSM = 0;
             
