@@ -9,9 +9,13 @@ const char* password = "pass";
 
 uint8_t baseCount=4;
 char* host[]={
+  //Red
   "rtk.toiso.fit",
+  //Green
   "rtk.toiso.fit",
+  //Blue
   "117.102.192.33",
+  //light blue
   "caster.agri-info-design.com"
 };
 int httpPort[]={
@@ -63,15 +67,19 @@ void setup() {
     switch (FSM)
     {
       case 0:
+        //RED
         setBuff(0x40, 0x00, 0x00);
       break;
       case 1:
+        /Green
         setBuff(0x00, 0x40, 0x00);
       break;
       case 2:
+        //Blue
         setBuff(0x00, 0x00, 0x40);
       break;
       case 3:
+        //light blue
         setBuff(0x00, 0x40, 0x40);
       break;
 
