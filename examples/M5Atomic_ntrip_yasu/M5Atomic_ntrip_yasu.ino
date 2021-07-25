@@ -3,9 +3,13 @@
 #include <EEPROM.h>
 #include <WiFi.h> 
 #include "NTRIPClient.h"
+/*
+const char* ssid     = "iPhone White";
+const char* password = "hujmjzd05rv19";
+*/
 
-const char* ssid     = "SSID";
-const char* password = "pass";
+const char* ssid     = "AirMac_Wi-Fi";
+const char* password = "chaylan22";
 
 uint8_t baseCount=4;
 char* host[]={
@@ -36,7 +40,7 @@ char* passwd[]={
   "",
   "",
   "",
-  "pass"
+  "8edc5d57"
 };
 
 NTRIPClient ntrip_c;
@@ -46,11 +50,11 @@ uint64_t Count;
 void setup() {
     Serial.begin(115200);
     Serial2.begin(115200,SERIAL_8N1,22,19);
+    delay(10);
     M5.begin(true, false, true);
     delay(10);
     //setBuff(0xff, 0x00, 0x00);
 
-    delay(10);
     Serial.println();
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
@@ -118,12 +122,12 @@ void loop() {
       delay(50);
       ESP.restart();
       }
-      while(ntrip_c.available()) {
-        char ch = ntrip_c.read();        
-        Serial2.print(ch);
-        Count++;
-      }
-      Serial2.flush();
+    while(ntrip_c.available()) {
+      char ch = ntrip_c.read();        
+      Serial2.print(ch);
+      Count++;
+    }
+    Serial2.flush();
     Serial.print(host[FSM]);
     Serial.print(",");
     Serial.print(httpPort[FSM]);
@@ -135,8 +139,8 @@ void loop() {
    // Serial.print(passwd[FSM]);
    // Serial.print(",");
     Serial.println(Count);
-  delay(1000);
-  M5.update();
+    delay(1000);
+    M5.update();
 }
 
 
