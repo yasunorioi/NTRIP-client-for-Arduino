@@ -3,6 +3,7 @@
 #include <EEPROM.h>
 #include <WiFi.h> 
 #include "NTRIPClient.h"
+#include "esp_wifi.h"
 
 const char* ssid     = "SSID";
 const char* password = "pass";
@@ -47,6 +48,9 @@ NTRIPClient ntrip_c;
 uint8_t DisBuff[2 + 5 * 5 * 3];
 uint8_t FSM;
 uint64_t Count;
+uint8_t WiFiCount;
+uint8_t WiFiStatus;
+
 void setup() {
     Serial.begin(115200);
     Serial2.begin(115200,SERIAL_8N1,22,19);
@@ -58,8 +62,15 @@ void setup() {
     Serial.println();
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
+      delay(1000);
+/*      WiFiCount++;
       Serial.print(".");
+            if (WiFiCount == 5 || WiFiStatus == WL_NO_SSID_AVAIL) {
+            esp_wifi_restore();
+            WiFi.begin(ssid, password);
+            delay(1000);
+        }
+        */
     }
 
     EEPROM.begin(1);
@@ -71,7 +82,7 @@ void setup() {
         setBuff(0x40, 0x00, 0x00);
       break;
       case 1:
-        /Green
+        //Green
         setBuff(0x00, 0x40, 0x00);
       break;
       case 2:
@@ -106,8 +117,11 @@ void setup() {
     ntrip_c.stop(); //Need to call "stop" function for next request.
   
     if(!ntrip_c.reqRaw(host[FSM],httpPort[FSM],mntpnt[FSM],user[FSM],passwd[FSM])){
-    delay(15000);
-    ESP.restart();
+      FSM++;
+      EEPROM.put(0,FSM);
+      EEPROM.commit();
+      delay(10000);
+      ESP.restart();
   }
 }
 
@@ -126,12 +140,13 @@ void loop() {
       delay(50);
       ESP.restart();
       }
-      while(ntrip_c.available()) {
-        char ch = ntrip_c.read();        
-        Serial2.print(ch);
-        Count++;
+    while(ntrip_c.available()) {
+      char ch = ntrip_c.read();        
+      Serial2.print(ch);
+      Count++;
       }
-      Serial2.flush();
+    Serial2.flush();
+    
     Serial.print(host[FSM]);
     Serial.print(",");
     Serial.print(httpPort[FSM]);
@@ -140,11 +155,11 @@ void loop() {
     Serial.print(",");
     Serial.print(user[FSM]);
     Serial.print(",");
-   // Serial.print(passwd[FSM]);
-   // Serial.print(",");
+ // Serial.print(passwd[FSM]);
+ // Serial.print(",");
     Serial.println(Count);
-  delay(1000);
-  M5.update();
+    delay(1000);
+    M5.update();
 }
 
 
