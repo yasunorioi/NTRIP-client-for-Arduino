@@ -11,7 +11,7 @@ https://shop.m5stack.com/collections/m5-atom/products/atom-rs232-kit
 
 #Misc
 
-**kubota WRH1200A
+-kubota WRH1200A
 WRH1200A must be GPS, Glonass only data.
 If you input other RTCM3 data, it will not be fixed.
 
