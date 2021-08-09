@@ -28,7 +28,7 @@ int httpPort[]={
 char* mntpnt[]={
   "eniwa-bd982cmr",
   "eniwa-f9p",
-  "ENIWA-K-F9P",
+  "eniwa-kazui",
   "00001122"
 };
 char* user[]={
