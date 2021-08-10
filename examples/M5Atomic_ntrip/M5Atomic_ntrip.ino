@@ -1,3 +1,12 @@
+/*
+author=yasunorioi
+maintainer=yasunorioi  <bb.folf@gmail.com>
+sentence=Library for M5Atomic RS232 with high precision reciever 
+paragraph=
+category=Communication
+url=https://github.com/yasunorioi/NTRIP-client-for-Arduino
+architectures=esp8266,esp32
+*/
 
 #include "M5Atom.h"
 #include <EEPROM.h>
