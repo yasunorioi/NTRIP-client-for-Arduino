@@ -14,7 +14,25 @@ architectures=esp8266,esp32
 #include "NTRIPClient.h"
 #include "esp_wifi.h"
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+/*
+Maybe you need WiFiAP fresh setup.
+https://github.com/espressif/arduino-esp32/issues/400#issuecomment-411076993
 
+#include <WiFi.h>
+void setup() {
+  // put your setup code here, to run once:
+WiFi.disconnect(true);   // still not erasing the ssid/pw. Will happily reconnect on next start
+WiFi.begin("0","0");       // adding this effectively seems to erase the previous stored SSID/PW
+ESP.restart();
+delay(1000);
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+
+} 
+ */
+ 
 /*const char* ssid     = "SSID";
 const char* password = "pass";
 */
