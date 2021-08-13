@@ -13,9 +13,11 @@ architectures=esp8266,esp32
 #include <WiFi.h> 
 #include "NTRIPClient.h"
 #include "esp_wifi.h"
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 
-const char* ssid     = "SSID";
+/*const char* ssid     = "SSID";
 const char* password = "pass";
+*/
 
 uint8_t baseCount=4;
 char* host[]={
@@ -69,7 +71,20 @@ void setup() {
 
     delay(10);
     Serial.println();
-    WiFi.begin(ssid, password);
+    WiFi.mode(WIFI_STA); 
+    WiFiManager wm;
+    bool res;
+    res = wm.autoConnect("M5Atom","m5atomic"); // password protected ap
+
+    if(!res) {
+        Serial.println("Failed to connect");
+        // ESP.restart();
+    }
+    else {
+        //if you get here you have connected to the WiFi    
+        Serial.println("connected...yeey :)");
+    
+/*    WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
       delay(1000);
 /*      WiFiCount++;
@@ -79,8 +94,8 @@ void setup() {
             WiFi.begin(ssid, password);
             delay(1000);
         }
-        */
-    }
+        
+    }*/
 
     EEPROM.begin(1);
     eeprom_read();
@@ -133,7 +148,7 @@ void setup() {
       ESP.restart();
   }
 }
-
+}
 void loop() {
     delay(1000);
     if (M5.Btn.wasPressed())
