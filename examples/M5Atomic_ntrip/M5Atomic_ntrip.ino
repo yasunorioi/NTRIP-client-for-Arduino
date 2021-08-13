@@ -14,6 +14,7 @@ architectures=esp8266,esp32
 #include "NTRIPClient.h"
 #include "esp_wifi.h"
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+// WiFiAP:"M5Atom" Password:"m5atomic"
 /*
 Maybe you need WiFiAP fresh setup.
 https://github.com/espressif/arduino-esp32/issues/400#issuecomment-411076993
