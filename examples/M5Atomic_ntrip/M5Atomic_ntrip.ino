@@ -133,7 +133,7 @@ void setup() {
         setBuff(0x00, 0x00, 0x40);
       break;
       case 3:
-        //light blue
+        //pink
         setBuff(0x00, 0x40, 0x40);
       break;
 
