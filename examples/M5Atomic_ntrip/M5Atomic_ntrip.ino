@@ -14,7 +14,7 @@ architectures=esp8266,esp32
 #include "NTRIPClient.h"
 #include "esp_wifi.h"
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
-// WiFiAP:"M5Atom" Password:"m5atomic"
+// WiFiAP:"M5Atom" Password:"m5atompass"
 /*
 Maybe you need WiFiAP fresh setup.
 https://github.com/espressif/arduino-esp32/issues/400#issuecomment-411076993
@@ -47,7 +47,7 @@ char* host[]={
   //Blue
   "117.102.192.33",
   //light blue
-  "caster.agri-info-design.com"
+  "rtk.toiso.fit"
 };
 int httpPort[]={
   2101,
@@ -56,22 +56,22 @@ int httpPort[]={
   2101
 };
 char* mntpnt[]={
-  "eniwa-bd982cmr",
+  "eniwa-bd982",
   "eniwa-f9p",
   "eniwa-kazui",
-  "00001122"
+  "eniwa-bd970"
 };
 char* user[]={
   "",
   "",
   "",
-  "USER"
+  ""
 };
 char* passwd[]={
   "",
   "",
   "",
-  "pass"
+  ""
 };
 
 NTRIPClient ntrip_c;
@@ -93,7 +93,7 @@ void setup() {
     WiFi.mode(WIFI_STA); 
     WiFiManager wm;
     bool res;
-    res = wm.autoConnect("M5Atom","m5atomic"); // password protected ap
+    res = wm.autoConnect("M5Atom","m5atompass"); // password protected ap
 
     if(!res) {
         Serial.println("Failed to connect");
