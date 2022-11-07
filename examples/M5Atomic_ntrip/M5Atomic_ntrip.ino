@@ -83,6 +83,8 @@ uint8_t WiFiCount;
 uint8_t WiFiStatus;
 
 void setup() {
+    pinMode(0,OUTPUT);
+    digitalWrite(0,LOW);
     Serial.begin(115200);
     Serial2.begin(115200,SERIAL_8N1,22,19);
     M5.begin(true, false, true);
