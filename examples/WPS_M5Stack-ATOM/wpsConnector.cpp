@@ -1,3 +1,6 @@
+/*
+ * https://qiita.com/coppercele/items/6789deea453826916725
+ */
 #include "wpsConnector.h"
 
 static esp_wps_config_t config;

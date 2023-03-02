@@ -33,3 +33,8 @@
 
 #MacOS
 .DS_Store
+
+#Arduino IDE 2.0
+debug.cfg
+debug_custom.json
+esp32.svd

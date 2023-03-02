@@ -1,3 +1,6 @@
+/*
+ * https://qiita.com/coppercele/items/6789deea453826916725
+ */
 #pragma once
 #include <Arduino.h>
 #include "esp_wps.h"
