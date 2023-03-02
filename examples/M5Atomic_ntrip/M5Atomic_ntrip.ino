@@ -39,40 +39,40 @@ void loop() {
 const char* password = "pass";
 */
 
-uint8_t baseCount=4;
+uint8_t baseCount=2;
 char* host[]={
   //Red
   "rtk.toiso.fit",
   //Green
-//  "rtk.toiso.fit",
+  "rtk.toiso.fit"
   //Blue
 //  "117.102.192.33",
   //light blue
-  "rtk.toiso.fit"
+//  "rtk.toiso.fit"
 };
 int httpPort[]={
   2101,
-//  2101,
-//  2101,
   2101
+//  2101,
+//  2101
 };
 char* mntpnt[]={
   "eniwa-bd982",
-//  "eniwa-f9p",
+  "eniwa-f9p"
 //  "eniwa-kazui",
-  "eniwa-bd970"
+//  "eniwa-bd970"
 };
 char* user[]={
   "",
-//  "",
-//  "",
   ""
+//  "",
+//  ""
 };
 char* passwd[]={
   "",
-//  "",
-//  "",
   ""
+//  "",
+//  ""
 };
 
 NTRIPClient ntrip_c;
