@@ -6,7 +6,12 @@
  * 
  * 
  */
+
+
+
+
 //#include <ESP8266WiFi.h>  //Need for ESP8266
+
 #include "M5Atom.h"
 #include "esp_wps.h"
 #include <WiFi.h>           //Need for ESP32 
@@ -21,11 +26,19 @@ char* user   = "";
 char* passwd = "";
 NTRIPClient ntrip_c;
 
+uint64_t Count;
+
+unsigned long prev,next,interval;
 
 void setup() {
   // put your setup code here, to run once:
   pinMode(0,OUTPUT);
   digitalWrite(0,LOW);
+
+  // start timer
+  prev=0;
+  interval=1000;
+  
   Serial.begin(115200);
   Serial2.begin(115200,SERIAL_8N1,22,19);
 
@@ -39,7 +52,6 @@ void setup() {
     wificount++;
   
   if (wificount == 5){
-    WiFi.disconnect();
     Serial.println("Starting WPS");
     WiFi.disconnect();
     wpsConnect();
@@ -49,7 +61,7 @@ void setup() {
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
-  
+
   Serial.println("Requesting SourceTable.");
   if(ntrip_c.reqSrcTbl(host,httpPort)){
     char buffer[512];
@@ -77,10 +89,18 @@ void setup() {
 }
 
 void loop() {
+  
   // put your main code here, to run repeatedly:
   while(ntrip_c.available()) {
         char ch = ntrip_c.read();        
         Serial2.print(ch);
+        Count++;
         
+  }
+  unsigned long curr=millis();
+  if ((curr - prev) >= interval){  
+  Serial.print("bit:");
+  Serial.println(Count);
+  prev=curr;
   }
 }
