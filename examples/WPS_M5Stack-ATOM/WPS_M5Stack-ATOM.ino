@@ -7,9 +7,6 @@
  * 
  */
 
-
-
-
 //#include <ESP8266WiFi.h>  //Need for ESP8266
 
 #include "M5Atom.h"
