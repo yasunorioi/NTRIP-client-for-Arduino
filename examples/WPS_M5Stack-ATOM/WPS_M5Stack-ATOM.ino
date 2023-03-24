@@ -91,6 +91,7 @@ void loop() {
   while(ntrip_c.available()) {
         char ch = ntrip_c.read();        
         Serial2.print(ch);
+        Serial2.flush();
         Count++;
         
   }

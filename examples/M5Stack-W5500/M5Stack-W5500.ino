@@ -11,8 +11,13 @@
 #include "NTRIPClient.h"
 #include <M5Stack.h>
 #include <SPI.h>
+
 #include <Ethernet2.h>
 EthernetClient client;
+/* #include <ESPmDNS.h>
+const char* MDNS_NAME="m5stack";
+*/
+
 #define SCK  18
 #define MISO 19
 #define MOSI 23
@@ -34,10 +39,10 @@ const char* password = "your_password";
 */
 
 //char* host = "192.168.10.9";
- char* host = "rtk.toiso.fit";
+ char* host = "192.168.10.126";
 int httpPort = 2101; //port 2101 is default port of NTRIP caster
 //char* mntpnt = "eniwa-ubx2";
-char* mntpnt = "eniwa-bd982";
+char* mntpnt = "eniwa-f9p";
 
 char* user   = ""; //ntrip caster's client user
 char* passwd = ""; //ntrip caster's client password
@@ -56,7 +61,7 @@ void setup() {
     Ethernet.init(CS);
     // start the Ethernet connection and the server:
     
-    //Ethernet.begin(mac, ip); //Static IP
+  //  Ethernet.begin(mac, ip); //Static IP
     Ethernet.begin(mac); // DHCP
     Serial.println(Ethernet.localIP());
 
@@ -68,9 +73,13 @@ void setup() {
     //Serial2.begin(115200,SERIAL_8N1,13,14);
     Serial.println(Ethernet.localIP());
     Serial.println("Requesting SourceTable.");
-    
- 　 if(ntrip_c.reqSrcTbl(host,httpPort)){
-  　  char buffer[512];
+    /*const char* server = host;
+    IPAddress server_ip = MDNS.queryHost(server);
+    Serial.print("Ntrip server IP");
+    Serial.println(server_ip);
+    */
+    if(ntrip_c.reqSrcTbl(host,httpPort)){
+      char buffer[512];
       delay(5);
         while(ntrip_c.available()){
           ntrip_c.readLine(buffer,sizeof(buffer));
@@ -101,6 +110,18 @@ void setup() {
     Serial.println("Requesting MountPoint is OK");
     M5.Lcd.println("Requesting MountPoint is OK");
     M5.Lcd.setTextSize(3);
+
+    //mDNS
+    /*
+    if(!MDNS.begin(MDNS_NAME)){
+    Serial.print("Error MDNS_NAME:");
+    Serial.println(MDNS_NAME);
+    delay(10000);
+    ESP.restart();
+
+  }
+  */
+
 }
 
 void loop() {
