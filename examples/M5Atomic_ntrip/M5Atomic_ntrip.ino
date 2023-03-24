@@ -12,8 +12,11 @@ architectures=esp8266,esp32
 #include <EEPROM.h>
 #include <WiFi.h> 
 #include "NTRIPClient.h"
-#include "esp_wifi.h"
-#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+//#include "esp_wifi.h"
+#include <WiFiManager.h> 
+#include "eniwa-agriICT.h"
+
+// https://github.com/tzapu/WiFiManager
 // WiFiAP:"M5Atom" Password:"m5atompass"
 /*
 Maybe you need WiFiAP fresh setup.
@@ -39,41 +42,7 @@ void loop() {
 const char* password = "pass";
 */
 
-uint8_t baseCount=2;
-char* host[]={
-  //Red
-  "rtk.toiso.fit",
-  //Green
-//  "rtk.toiso.fit",
-  //Blue
-  "117.102.192.33",
-  //light blue
-//  "rtk.toiso.fit"
-};
-int httpPort[]={
-  2101,
-  2101
-//  2101,
-//  2101
-};
-char* mntpnt[]={
-  "eniwa-bd982",
-//  "eniwa-f9p"
-//  "eniwa-kazui",
-  "eniwa-bd970"
-};
-char* user[]={
-  "",
-  ""
-//  "",
-//  ""
-};
-char* passwd[]={
-  "",
-  ""
-//  "",
-//  ""
-};
+
 
 NTRIPClient ntrip_c;
 uint8_t DisBuff[2 + 5 * 5 * 3];
@@ -143,17 +112,16 @@ void setup() {
       default:
       setBuff(0x00, 0x00, 0x00);
       break;
-
     }
     M5.dis.displaybuff(DisBuff);
     Serial.println(mntpnt[FSM]);
-    
+    Serial.println("Requesting SourceTable.");
     if(ntrip_c.reqSrcTbl(host[FSM],httpPort[FSM])){
-    char buffer[512];
-    delay(5);
-    while(ntrip_c.available()){
-      ntrip_c.readLine(buffer,sizeof(buffer));
-      Serial.print(buffer); 
+      char buffer[512];
+      delay(5);
+      while(ntrip_c.available()){
+       ntrip_c.readLine(buffer,sizeof(buffer));
+       Serial.print(buffer); 
       }
     }
     else{
@@ -161,7 +129,8 @@ void setup() {
     }
     Serial.print("Requesting SourceTable is OK\n");
     ntrip_c.stop(); //Need to call "stop" function for next request.
-  
+
+    Serial.println("Requesting MountPoint's Raw data");
     if(!ntrip_c.reqRaw(host[FSM],httpPort[FSM],mntpnt[FSM],user[FSM],passwd[FSM])){
       FSM++;
       EEPROM.put(0,FSM);
@@ -169,8 +138,10 @@ void setup() {
       delay(10000);
       ESP.restart();
   }
+  Serial.println("Requesting MountPoint is OK");
 }
 }
+
 void loop() {
     delay(1000);
     if (M5.Btn.wasPressed())
