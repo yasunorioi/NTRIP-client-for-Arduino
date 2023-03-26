@@ -52,16 +52,13 @@ uint8_t WiFiCount;
 uint8_t WiFiStatus;
 
 void setup() {
+    M5.begin(true, false, true);
     pinMode(0,OUTPUT);
     digitalWrite(0,LOW);
     Serial.begin(115200);
     Serial2.begin(115200,SERIAL_8N1,22,19);
-    M5.begin(true, false, true);
     delay(10);
-    //setBuff(0xff, 0x00, 0x00);
 
-    delay(10);
-    Serial.println();
     WiFi.mode(WIFI_STA); 
     WiFiManager wm;
     bool res;
@@ -75,21 +72,26 @@ void setup() {
         //if you get here you have connected to the WiFi    
         Serial.println("connected...yeey :)");
     
-/*    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(1000);
-/*      WiFiCount++;
-      Serial.print(".");
+       /* WiFi.begin(ssid, password);
+       while (WiFi.status() != WL_CONNECTED) {
+       delay(1000);
+       /*  WiFiCount++;
+       Serial.print(".");
             if (WiFiCount == 5 || WiFiStatus == WL_NO_SSID_AVAIL) {
             esp_wifi_restore();
             WiFi.begin(ssid, password);
             delay(1000);
         }
         
-    }*/
+       }*/
 
     EEPROM.begin(1);
-    eeprom_read();
+    EEPROM.get(0,FSM);
+    if (FSM>=baseCount){
+     EEPROM.put(0,0);
+     EEPROM.commit();
+     FSM=0;
+    }
     switch (FSM)
     {
       case 0:
@@ -191,14 +193,4 @@ void setBuff(uint8_t Rdata, uint8_t Gdata, uint8_t Bdata)
         DisBuff[2 + i * 3 + 1] = Gdata;
         DisBuff[2 + i * 3 + 2] = Bdata;
     }
-}
-
-
-void eeprom_read(){
-EEPROM.get(0,FSM);
-if (FSM>=baseCount){
-  EEPROM.put(0,0);
-  EEPROM.commit();
-  FSM=0;
- }
 }
