@@ -50,7 +50,7 @@ void setup() {
     WiFi.mode(WIFI_STA); 
     WiFiManager wm;
     bool res;
-    res = wm.autoConnect("M5Atom","m5atompass"); // password protected ap
+    res = wm.autoConnect("M5stack","m5atompass"); // password protected ap
 
     if(!res) {
       Serial.println("Failed to connect");
@@ -142,5 +142,3 @@ void loop() {
   M5.Lcd.println(Count);
   M5.update();
 }
-
-
