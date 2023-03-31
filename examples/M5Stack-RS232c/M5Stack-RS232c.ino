@@ -50,7 +50,7 @@ void setup() {
     WiFi.mode(WIFI_STA); 
     WiFiManager wm;
     bool res;
-    res = wm.autoConnect("M5stack","m5atompass"); // password protected ap
+    res = wm.autoConnect("M5stack","m5stackpass"); // password protected ap
 
     if(!res) {
       Serial.println("Failed to connect");
