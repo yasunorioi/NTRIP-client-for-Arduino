@@ -39,10 +39,10 @@ const char* password = "your_password";
 */
 
 //char* host = "192.168.10.9";
- char* host = "192.168.10.126";
+ char* host = "rtk.toiso.fit";
 int httpPort = 2101; //port 2101 is default port of NTRIP caster
 //char* mntpnt = "eniwa-ubx2";
-char* mntpnt = "eniwa-f9p";
+char* mntpnt = "eniwa-bd982";
 
 char* user   = ""; //ntrip caster's client user
 char* passwd = ""; //ntrip caster's client password

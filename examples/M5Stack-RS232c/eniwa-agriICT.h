@@ -6,9 +6,9 @@ char* host[]={
   //Red
   "rtk.toiso.fit",
   //Green
-//  "rtk.toiso.fit",
+  "rtk.toiso.fit"
   //Blue
-  "117.102.192.33",
+  //"117.102.192.33",
   //light blue
 //  "rtk.toiso.fit"
 };

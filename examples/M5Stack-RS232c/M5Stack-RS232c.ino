@@ -40,12 +40,13 @@ uint8_t FSM;
 uint64_t Count;
 uint8_t WiFiCount;
 uint8_t WiFiStatus;
+int uart_bps=115200;
 
 void setup() {
    // put your setup code here, to run once:
     M5.begin(true, false, true);
     delay(10);
-    Serial2.begin(115200, SERIAL_8N1,16,17);
+    Serial2.begin(uart_bps, SERIAL_8N1,16,17);
     Serial.println("Requesting SourceTable.");
     WiFi.mode(WIFI_STA); 
     WiFiManager wm;
@@ -102,7 +103,6 @@ void setup() {
     }
     Serial.println("Requesting MountPoint is OK");
     M5.Lcd.println("Requesting MountPoint is OK");
-    M5.Lcd.setTextSize(3);
   }
 }
 
@@ -138,7 +138,13 @@ void loop() {
  // Serial.print(passwd[FSM]);
  // Serial.print(",");
   Serial.println(Count);
+  M5.Lcd.setTextSize(3);  
   M5.Lcd.setCursor(0,48);
   M5.Lcd.println(Count);
+  M5.Lcd.setTextSize(2);  
+  M5.Lcd.setCursor(0,224);
+  M5.Lcd.print("RS232c:");
+  M5.Lcd.print(uart_bps);
+  M5.Lcd.println("bps");
   M5.update();
 }

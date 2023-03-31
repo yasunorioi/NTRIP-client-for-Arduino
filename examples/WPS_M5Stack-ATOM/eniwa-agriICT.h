@@ -8,7 +8,7 @@ char* host[]={
   //Green
 //  "rtk.toiso.fit",
   //Blue
-  "rtk.toiso.fit",
+  "rtk.toiso.fit"
   //light blue
 //  "rtk.toiso.fit"
 };

@@ -8,9 +8,9 @@ char* host[]={
   //Green
 //  "rtk.toiso.fit",
   //Blue
-  "117.102.192.33",
+//  "117.102.192.33",
   //light blue
-//  "rtk.toiso.fit"
+  "rtk.toiso.fit"
 };
 int httpPort[]={
   2101,
