@@ -118,6 +118,8 @@ void loop() {
       EEPROM.put(0,FSM);
       EEPROM.commit();
       Serial.println(FSM);
+      M5.Lcd.setCursor(0,48);
+      M5.Lcd.println("Change NTRIP Server");
       delay(50);
       ESP.restart();
     }
