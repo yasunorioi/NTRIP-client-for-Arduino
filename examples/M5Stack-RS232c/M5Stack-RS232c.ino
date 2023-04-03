@@ -46,6 +46,15 @@ void setup() {
    // put your setup code here, to run once:
     M5.begin(true, false, true);
     delay(10);
+    M5.Lcd.setTextSize(2);  
+    M5.Lcd.setCursor(0,0);
+    M5.Lcd.println("WiFi setup");
+    M5.Lcd.println("SSID:M5stack");
+    M5.Lcd.println("pass:m5stackpass");
+    M5.Lcd.println("http://192.168.4.1/");
+    M5.Lcd.println("");
+    M5.Lcd.println("WiFi Connecting...");
+
     Serial2.begin(uart_bps, SERIAL_8N1,16,17);
     Serial.println("Requesting SourceTable.");
     WiFi.mode(WIFI_STA); 
@@ -60,6 +69,8 @@ void setup() {
     else {
       //if you get here you have connected to the WiFi    
        Serial.println("connected...yeey :)");
+       M5.Lcd.println("connected...yeey :)");
+
        EEPROM.begin(1);
        EEPROM.get(0,FSM);
        if (FSM>=baseCount){
@@ -69,6 +80,7 @@ void setup() {
        }
        Serial.println(mntpnt[FSM]);
        Serial.println("Requesting SourceTable.");
+       M5.Lcd.println("Requesting SourceTable.");
        if(ntrip_c.reqSrcTbl(host[FSM],httpPort[FSM])){
        char buffer[512];
        delay(5);
@@ -79,11 +91,16 @@ void setup() {
     }
     else{
       Serial.println("SourceTable request error");
+      M5.Lcd.print("SourceTable request error");
     }
     Serial.print("Requesting SourceTable is OK\n");
+    M5.Lcd.print("Requesting SourceTable is OK\n");
     ntrip_c.stop(); //Need to call "stop" function for next request.
 
     Serial.println("Requesting MountPoint's Raw data");
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextSize(1);  
+    M5.Lcd.setCursor(0,0);
     M5.Lcd.print("ntrip://");
     M5.Lcd.print(user[FSM]);
     M5.Lcd.print(":");
