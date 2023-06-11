@@ -8,15 +8,15 @@ char* host[]={
   //Green
 //  "rtk.toiso.fit",
   //Blue
-//  "117.102.192.33",
-  //light blue
   "rtk.toiso.fit"
+  //light blue
+//  "rtk.toiso.fit"
 };
 int httpPort[]={
-//  2101,
-//  2101,
   2101,
   2101
+//  2101,
+//  2101
 };
 char* mntpnt[]={
   "eniwa-bd982",
@@ -25,15 +25,15 @@ char* mntpnt[]={
   "eniwa-bd970"
 };
 char* user[]={
-//  "",
-//  "",
   "",
   ""
+//  "",
+//  ""
 };
 char* passwd[]={
-//  "",
-//  "",
   "",
   ""
+//  "",
+//  ""
 };
 #endif
