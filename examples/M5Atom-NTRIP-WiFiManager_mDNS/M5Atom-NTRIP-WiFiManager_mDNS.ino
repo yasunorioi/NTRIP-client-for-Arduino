@@ -16,7 +16,7 @@ bool isWifiConfigSucceeded = false;
 const char* MDNS_NAME="m5stack";
 
 //ntrip server  .local不要
-const char* server = "piclock";
+const char* server = "your NTRIP server mDNS";
 // https://qiita.com/mhama/items/ff5ae397a853aa4f8d48
 
 // WiFi接続モードに移行した時に呼ばれるコールバック
