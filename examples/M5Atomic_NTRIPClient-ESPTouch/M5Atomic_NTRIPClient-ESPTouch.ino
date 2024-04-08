@@ -21,6 +21,8 @@ NTRIPClient ntrip_c;
 
 void setup() {
   M5.begin(true, false, true);
+  pinMode(0,OUTPUT);
+  digitalWrite(0,LOW);
   //Serial.begin(115200);
   Serial2.begin(115200, SERIAL_8N1, 22, 19);
   delay(10);
