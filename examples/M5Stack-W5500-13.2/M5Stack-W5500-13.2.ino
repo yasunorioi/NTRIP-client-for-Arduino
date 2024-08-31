@@ -21,7 +21,7 @@ const char* MDNS_NAME="m5stack";
 #define SCK  18
 #define MISO 19
 #define MOSI 23
-#define CS   26
+#define CS   5
 
 char uart_buffer[8]    = {0x01, 0x05, 0x00, 0x01, 0x02, 0x00, 0x9d, 0x6a};
 char uart_rx_buffer[8] = {0};
@@ -132,6 +132,6 @@ void loop() {
         Serial2.flush();
         Count++;
   }
-  M5.Lcd.setCursor(0,48);
+  M5.Lcd.setCursor(0,150);
   M5.Lcd.println(Count);
 }
