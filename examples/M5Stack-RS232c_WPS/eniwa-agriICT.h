@@ -1,7 +1,7 @@
 #ifndef ENIWA_AGRIICT
 #define ENIWA_AGRIICT
 
-uint8_t baseCount=3;
+uint8_t baseCount=2;
 char* host[]={
   //Red
   "rtk.toiso.fit",
