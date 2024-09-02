@@ -13,7 +13,17 @@
 #include "wpsConnector.h"
 //#include <WiFiManager.h> 
 #include "eniwa-agriICT.h"
+int uart_bps=115200;
 
+hw_timer_t* timer = NULL;
+
+unsigned long countnum;
+int num;
+
+void IRAM_ATTR onTimer(){
+  num = countnum;
+  countnum=0;
+}
 // https://github.com/tzapu/WiFiManager
 // WiFiAP:"M5Atom" Password:"m5atompass"
 /*
@@ -38,10 +48,9 @@ void loop() {
 NTRIPClient ntrip_c;
 uint8_t DisBuff[2 + 5 * 5 * 3];
 uint8_t FSM;
-uint64_t Count;
 uint8_t WiFiCount;
 uint8_t WiFiStatus;
-int uart_bps=115200;
+int oldnum;
 
 void setup() {
    // put your setup code here, to run once:
@@ -68,7 +77,7 @@ void setup() {
     Serial.println("WiFi connected");
     Serial.println("IP address: ");
     Serial.println(WiFi.localIP());
- 
+    configTime(9 * 3600, 0, "ntp.nict.jp", "ntp.jst.mfeed.ad.jp");
     //if you get here you have connected to the WiFi    
     Serial.println("connected...yeey :)");
     M5.Lcd.println("connected...yeey :)");
@@ -115,13 +124,18 @@ void setup() {
       FSM++;
       EEPROM.put(0,FSM);
       EEPROM.commit();
-      delay(10000);
+      delay(10);
       ESP.restart();
     }
+    timer =timerBegin(0,getApbFrequency()/1000000,true);
+    timerAttachInterrupt(timer,&onTimer,true);
+    timerAlarmWrite(timer,1000000*1,true);
+    timerAlarmEnable(timer);
+    timerRestart(timer);
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  M5.update();
   if (M5.BtnA.wasPressed())
    {
      FSM++;
@@ -134,33 +148,42 @@ void loop() {
       delay(50);
       ESP.restart();
     }
+    M5.Lcd.setTextSize(4);  
+    M5.Lcd.setCursor(0,48);
     while(ntrip_c.available()) {
-     char ch = ntrip_c.read();        
+     char ch = ntrip_c.read();
+     countnum++;
      Serial2.print(ch);
-     Count++;
-     Serial2.flush();
-     /*
-     Serial.print(host[FSM]);
-     Serial.print(",");
-     Serial.print(httpPort[FSM]);
-     Serial.print(",");
-     Serial.print(mntpnt[FSM]);
-     Serial.print(",");
-     Serial.print(user[FSM]);
-     Serial.print(",");
-     */
- // Serial.print(passwd[FSM]);
- // Serial.print(",");
-     Serial.println(Count);
-     M5.Lcd.setTextSize(3);  
-     M5.Lcd.setCursor(0,48);
-     M5.Lcd.println(Count);
-     M5.Lcd.setTextSize(2);  
-     M5.Lcd.setCursor(0,224);
-     M5.Lcd.print("RS232c:");
-     M5.Lcd.print(uart_bps);
-     M5.Lcd.println("bps");
-     //delay(100);
     }
-    M5.update();
+     Serial2.flush();
+  /*
+   *  512*8 buffer
+   * 
+  while(ntrip_c.available()) {
+    rtcmData[rtcmCount++] = ntrip_c.read();
+    if (rtcmCount == sizeof(rtcmData)){
+      rtcmCount = 0;
+      break;
+    }
+  }
+
+ if (rtcmCount>2048){
+    for(size_t i=0 ; i <= rtcmCount ; i++){
+      Serial2.print(rtcmData[i]);
+    }
+    count++;
+  }*/
+
+ // Serial.println(countnum);
+ if (oldnum!=num){
+    //M5.Lcd.print(countnum);
+    M5.Lcd.print(num*8);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.print(" B/s");
+    M5.Lcd.setCursor(0,224);
+    M5.Lcd.print("RS232c:");
+    M5.Lcd.print(uart_bps);
+    M5.Lcd.println("bps");
+    num==oldnum;
+ }
 }
