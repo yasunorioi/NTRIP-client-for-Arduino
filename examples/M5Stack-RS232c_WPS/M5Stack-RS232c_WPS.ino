@@ -16,13 +16,16 @@
 int uart_bps=115200;
 
 hw_timer_t* timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
 unsigned long countnum;
 int num;
 
 void IRAM_ATTR onTimer(){
+  portENTER_CRITICAL_ISR(&timerMux);
   num = countnum;
   countnum=0;
+  portEXIT_CRITICAL_ISR(&timerMux);
 }
 // https://github.com/tzapu/WiFiManager
 // WiFiAP:"M5Atom" Password:"m5atompass"
