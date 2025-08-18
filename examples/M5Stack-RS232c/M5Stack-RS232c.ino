@@ -14,7 +14,7 @@
 #include "eniwa-agriICT.h"
 
 // https://github.com/tzapu/WiFiManager
-// WiFiAP:"M5Atom" Password:"m5atompass"
+// WiFiAP:"M5Atom" Password:"m5stackpass"
 /*
 Maybe you need WiFiAP fresh setup.
 https://github.com/espressif/arduino-esp32/issues/400#issuecomment-411076993
