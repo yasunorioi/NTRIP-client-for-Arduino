@@ -8,12 +8,15 @@
  */
 //#include <ESP8266WiFi.h>  //Need for ESP8266
 #include "NTRIPClient.h"
-#include <EEPROM.h>
 #include <M5Stack.h>
 #include "wpsConnector.h"
-//#include <WiFiManager.h> 
-#include "eniwa-agriICT.h"
 int uart_bps=115200;
+
+char* host     = "rtk.toiso.fit";
+int   httpPort = 2101;
+char* mntpnt   = "eniwa-bd982";
+char* user     = "";
+char* passwd   = "";
 
 hw_timer_t* timer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
@@ -49,10 +52,6 @@ void loop() {
 
 */
 NTRIPClient ntrip_c;
-uint8_t DisBuff[2 + 5 * 5 * 3];
-uint8_t FSM;
-uint8_t WiFiCount;
-uint8_t WiFiStatus;
 int oldnum;
 
 void setup() {
@@ -84,50 +83,36 @@ void setup() {
     //if you get here you have connected to the WiFi    
     Serial.println("connected...yeey :)");
     M5.Lcd.println("connected...yeey :)");
-    EEPROM.begin(1);
-    EEPROM.get(0,FSM);
-    if (FSM>=baseCount){
-      EEPROM.put(0,0);
-      EEPROM.commit();
-      FSM=0;
-    }
-    Serial.println(mntpnt[FSM]);
+    Serial.println(mntpnt);
     Serial.println("Requesting SourceTable.");
     M5.Lcd.println("Requesting SourceTable.");
-    if(ntrip_c.reqSrcTbl(host[FSM],httpPort[FSM])){
+    if(ntrip_c.reqSrcTbl(host,httpPort)){
       char buffer[512];
       delay(5);
       while(ntrip_c.available()){
-      ntrip_c.readLine(buffer,sizeof(buffer));
-      Serial.print(buffer); 
+        ntrip_c.readLine(buffer,sizeof(buffer));
+        Serial.print(buffer);
+      }
+    } else {
+      Serial.println("SourceTable request error");
+      M5.Lcd.print("SourceTable request error");
     }
-  } else {
-    Serial.println("SourceTable request error");
-    M5.Lcd.print("SourceTable request error");
-  }
     Serial.print("Requesting SourceTable is OK\n");
     M5.Lcd.print("Requesting SourceTable is OK\n");
-    ntrip_c.stop(); //Need to call "stop" function for next request.
+    ntrip_c.stop();
 
     Serial.println("Requesting MountPoint's Raw data");
     M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setTextSize(1);  
+    M5.Lcd.setTextSize(1);
     M5.Lcd.setCursor(0,0);
     M5.Lcd.print("ntrip://");
-    M5.Lcd.print(user[FSM]);
+    M5.Lcd.print(host);
     M5.Lcd.print(":");
-    M5.Lcd.print(passwd[FSM]);
-    M5.Lcd.print("@");
-    M5.Lcd.print(host[FSM]);
-    M5.Lcd.print(":");
-    M5.Lcd.print(httpPort[FSM]);
+    M5.Lcd.print(httpPort);
     M5.Lcd.print("/");
-    M5.Lcd.println(mntpnt[FSM]);
-    if(!ntrip_c.reqRaw(host[FSM],httpPort[FSM],mntpnt[FSM],user[FSM],passwd[FSM])){
-      FSM++;
-      EEPROM.put(0,FSM);
-      EEPROM.commit();
-      delay(10);
+    M5.Lcd.println(mntpnt);
+    if(!ntrip_c.reqRaw(host,httpPort,mntpnt,user,passwd)){
+      delay(10000);
       ESP.restart();
     }
     timer =timerBegin(0,getApbFrequency()/1000000,true);
@@ -139,26 +124,14 @@ void setup() {
 
 void loop() {
   M5.update();
-  if (M5.BtnA.wasPressed())
-   {
-     FSM++;
-     if (FSM >= baseCount){ FSM = 0;}
-      EEPROM.put(0,FSM);
-      EEPROM.commit();
-      Serial.println(FSM);
-      M5.Lcd.setCursor(0,48);
-      M5.Lcd.println("Change NTRIP Server");
-      delay(50);
-      ESP.restart();
-    }
-    M5.Lcd.setTextSize(4);  
-    M5.Lcd.setCursor(0,48);
-    while(ntrip_c.available()) {
-     char ch = ntrip_c.read();
-     countnum++;
-     Serial2.print(ch);
-    }
-     Serial2.flush();
+  M5.Lcd.setTextSize(4);
+  M5.Lcd.setCursor(0,48);
+  while(ntrip_c.available()) {
+    char ch = ntrip_c.read();
+    countnum++;
+    Serial2.print(ch);
+  }
+  Serial2.flush();
   /*
    *  512*8 buffer
    * 

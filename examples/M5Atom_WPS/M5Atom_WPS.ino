@@ -10,14 +10,17 @@
 #include "esp_wps.h"
 #include <WiFi.h>           //Need for ESP32 
 #include "wpsConnector.h"
-#include <EEPROM.h>
 #include "NTRIPClient.h"
-#include "eniwa-agriICT.h"
 
 NTRIPClient ntrip_c;
 
+char* host     = "rtk.toiso.fit";
+int   httpPort = 2101;
+char* mntpnt   = "eniwa-bd982";
+char* user     = "";
+char* passwd   = "";
+
 uint8_t DisBuff[2 + 5 * 5 * 3];
-uint8_t FSM;
 uint64_t Count;
 uint8_t WiFiCount;
 uint8_t WiFiStatus;
@@ -56,40 +59,16 @@ void setup() {
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 
-      EEPROM.begin(1);
-    eeprom_read();
-    switch (FSM)
-    {
-      case 0:
-        //RED
-        setBuff(0x40, 0x00, 0x00);
-      break;
-      case 1:
-        //Green
-        setBuff(0x00, 0x40, 0x00);
-      break;
-      case 2:
-        //Blue
-        setBuff(0x00, 0x00, 0x40);
-      break;
-      case 3:
-        //pink
-        setBuff(0x00, 0x40, 0x40);
-      break;
-
-      default:
-      setBuff(0x00, 0x00, 0x00);
-      break;
-    }
+  setBuff(0x40, 0x00, 0x00);
   M5.dis.displaybuff(DisBuff);
-  Serial.println(mntpnt[FSM]);
+  Serial.println(mntpnt);
   Serial.println("Requesting SourceTable.");
-  if(ntrip_c.reqSrcTbl(host[FSM],httpPort[FSM])){
+  if(ntrip_c.reqSrcTbl(host,httpPort)){
     char buffer[512];
     delay(5);
     while(ntrip_c.available()){
       ntrip_c.readLine(buffer,sizeof(buffer));
-      Serial.print(buffer); 
+      Serial.print(buffer);
       }
   }
   else{
@@ -97,12 +76,9 @@ void setup() {
   }
   Serial.print("Requesting SourceTable is OK\n");
   ntrip_c.stop(); //Need to call "stop" function for next request.
-  
+
   Serial.println("Requesting MountPoint's Raw data");
-  if(!ntrip_c.reqRaw(host[FSM],httpPort[FSM],mntpnt[FSM],user[FSM],passwd[FSM])){
-    FSM++;
-    EEPROM.put(0,FSM);
-    EEPROM.commit();
+  if(!ntrip_c.reqRaw(host,httpPort,mntpnt,user,passwd)){
     delay(15000);
     ESP.restart();
   }
@@ -110,35 +86,19 @@ void setup() {
 }
 
 void loop() {
-      delay(1000);
-    if (M5.Btn.wasPressed())
-    {
-        FSM++;
-        if (FSM >= baseCount)
-          {
-          FSM = 0;
-          }
-      EEPROM.put(0,FSM);
-      EEPROM.commit();
-      Serial.println(FSM);
-      delay(50);
-      ESP.restart();
-    }
-  // put your main code here, to run repeatedly:
+  delay(1000);
   while(ntrip_c.available()) {
-        char ch = ntrip_c.read();        
-        Serial2.print(ch);
-
-        Count++;
-        
+    char ch = ntrip_c.read();
+    Serial2.print(ch);
+    Count++;
   }
   Serial2.flush();
 
   unsigned long curr=millis();
-  if ((curr - prev) >= interval){  
-  Serial.print("bit:");
-  Serial.println(Count);
-  prev=curr;
+  if ((curr - prev) >= interval){
+    Serial.print("bit:");
+    Serial.println(Count);
+    prev=curr;
   }
   M5.update();
 }
@@ -156,12 +116,4 @@ void setBuff(uint8_t Rdata, uint8_t Gdata, uint8_t Bdata)
 }
 
 
-void eeprom_read(){
-EEPROM.get(0,FSM);
-if (FSM>=baseCount){
-  EEPROM.put(0,0);
-  EEPROM.commit();
-  FSM=0;
- }
-}
 
