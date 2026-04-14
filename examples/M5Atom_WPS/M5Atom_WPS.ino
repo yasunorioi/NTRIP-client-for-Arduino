@@ -1,119 +1,134 @@
 /*
- *  NTRIP client for Arduino Ver. 1.0.0 
- *  NTRIPClient Sample
- *  Request Source Table (Source Table is basestation list in NTRIP Caster)
- *  Request Reference Data 
- * 
- * 
+ *  NTRIP client for M5Atom (M5Unified + WPS)
+ *  - Connects to NTRIP caster and forwards RTCM data to Serial2
+ *  - LED: Green=receiving, Red=disconnected, Rainbow=stalled
+ *  - Uses WPS for WiFi setup
  */
-#include "M5Atom.h"
+#include <M5Unified.h>
+#include <WiFi.h>
 #include "esp_wps.h"
-#include <WiFi.h>           //Need for ESP32 
 #include "wpsConnector.h"
 #include "NTRIPClient.h"
 
 NTRIPClient ntrip_c;
 
+// ---- NTRIP Server Config ----
 char* host     = "rtk.toiso.fit";
 int   httpPort = 2101;
 char* mntpnt   = "eniwa-bd982";
 char* user     = "";
 char* passwd   = "";
 
-uint8_t DisBuff[2 + 5 * 5 * 3];
-uint64_t Count;
-uint8_t WiFiCount;
-uint8_t WiFiStatus;
+// ---- State ----
+uint64_t totalBytes = 0;
+uint64_t lastBytes  = 0;
+unsigned long lastDataTime = 0;
+const unsigned long STALL_TIMEOUT_MS = 5000;
+uint8_t rainbowHue = 0;
 
-unsigned long prev,next,interval;
+void hsvToRgb(uint8_t h, uint8_t s, uint8_t v, uint8_t &r, uint8_t &g, uint8_t &b) {
+  uint8_t region = h / 43;
+  uint8_t remainder = (h - region * 43) * 6;
+  uint8_t p = (v * (255 - s)) >> 8;
+  uint8_t q = (v * (255 - ((s * remainder) >> 8))) >> 8;
+  uint8_t t = (v * (255 - ((s * (255 - remainder)) >> 8))) >> 8;
+  switch (region) {
+    case 0:  r=v; g=t; b=p; break;
+    case 1:  r=q; g=v; b=p; break;
+    case 2:  r=p; g=v; b=t; break;
+    case 3:  r=p; g=q; b=v; break;
+    case 4:  r=t; g=p; b=v; break;
+    default: r=v; g=p; b=q; break;
+  }
+}
+
+void setLed(uint8_t r, uint8_t g, uint8_t b) {
+  M5.dis.drawpix(0, (CRGB){r, g, b});
+}
+
+void setLedRainbow() {
+  uint8_t r, g, b;
+  hsvToRgb(rainbowHue, 255, 64, r, g, b);
+  setLed(r, g, b);
+  rainbowHue += 4;
+}
 
 void setup() {
-  // put your setup code here, to run once:
-  pinMode(0,OUTPUT);
-  digitalWrite(0,LOW);
-
-  // start timer
-  prev=0;
-  interval=1000;
-  
+  auto cfg = M5.config();
+  M5.begin(cfg);
   Serial.begin(115200);
-  Serial2.begin(115200,SERIAL_8N1,22,19);
+  Serial2.begin(115200, SERIAL_8N1, 22, 19);
 
-  M5.begin(true, false, true);
-  delay(10);
+  setLed(0x40, 0x40, 0); // Yellow = connecting WiFi
   WiFi.begin();
-  int wificount=0;
+  int wificount = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
     wificount++;
-  
-  if (wificount == 5){
-    Serial.println("Starting WPS");
-    WiFi.disconnect();
-    wpsConnect();
-  } 
+    if (wificount == 5) {
+      Serial.println("Starting WPS");
+      WiFi.disconnect();
+      wpsConnect();
+    }
   }
-  Serial.println(WiFi.SSID());
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  Serial.print("WiFi connected: ");
   Serial.println(WiFi.localIP());
 
-  setBuff(0x40, 0x00, 0x00);
-  M5.dis.displaybuff(DisBuff);
-  Serial.println(mntpnt);
-  Serial.println("Requesting SourceTable.");
-  if(ntrip_c.reqSrcTbl(host,httpPort)){
-    char buffer[512];
-    delay(5);
-    while(ntrip_c.available()){
-      ntrip_c.readLine(buffer,sizeof(buffer));
-      Serial.print(buffer);
-      }
-  }
-  else{
-    Serial.println("SourceTable request error");
-  }
-  Serial.print("Requesting SourceTable is OK\n");
-  ntrip_c.stop(); //Need to call "stop" function for next request.
+  Serial.printf("Connecting: %s:%d/%s\n", host, httpPort, mntpnt);
 
-  Serial.println("Requesting MountPoint's Raw data");
-  if(!ntrip_c.reqRaw(host,httpPort,mntpnt,user,passwd)){
+  if (!ntrip_c.reqRaw(host, httpPort, mntpnt, user, passwd)) {
+    Serial.println("NTRIP connection failed, restarting...");
+    setLed(0x40, 0, 0);
     delay(15000);
     ESP.restart();
   }
-  Serial.println("Requesting MountPoint is OK");
+
+  Serial.println("NTRIP connected!");
+  setLed(0, 0x40, 0); // Green = connected
+  lastDataTime = millis();
 }
 
 void loop() {
-  delay(1000);
-  while(ntrip_c.available()) {
+  M5.update();
+
+  while (ntrip_c.available()) {
     char ch = ntrip_c.read();
     Serial2.print(ch);
-    Count++;
+    totalBytes++;
   }
   Serial2.flush();
 
-  unsigned long curr=millis();
-  if ((curr - prev) >= interval){
-    Serial.print("bit:");
-    Serial.println(Count);
-    prev=curr;
+  unsigned long now = millis();
+
+  if (totalBytes > lastBytes) {
+    lastBytes = totalBytes;
+    lastDataTime = now;
+    setLed(0, 0x40, 0);
   }
-  M5.update();
-}
 
-void setBuff(uint8_t Rdata, uint8_t Gdata, uint8_t Bdata)
-{
-    DisBuff[0] = 0x05;
-    DisBuff[1] = 0x05;
-    for (int i = 0; i < 25; i++)
-    {
-        DisBuff[2 + i * 3 + 0] = Rdata;
-        DisBuff[2 + i * 3 + 1] = Gdata;
-        DisBuff[2 + i * 3 + 2] = Bdata;
+  if (now - lastDataTime > STALL_TIMEOUT_MS) {
+    setLedRainbow();
+    if (now - lastDataTime > 30000) {
+      Serial.println("Stalled 30s, restarting...");
+      ntrip_c.stop();
+      delay(1000);
+      ESP.restart();
     }
+  }
+
+  if (!ntrip_c.connected()) {
+    Serial.println("NTRIP disconnected, restarting...");
+    setLed(0x40, 0, 0);
+    delay(5000);
+    ESP.restart();
+  }
+
+  static unsigned long lastPrint = 0;
+  if (now - lastPrint >= 1000) {
+    Serial.printf("RTCM bytes: %llu\n", totalBytes);
+    lastPrint = now;
+  }
+
+  delay(10);
 }
-
-
-

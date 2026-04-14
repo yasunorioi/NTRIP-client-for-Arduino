@@ -1,165 +1,152 @@
 /*
- *  NTRIP client for Arduino Ver. 1.0.0 
- *  NTRIPClient Sample
- *  Request Source Table (Source Table is basestation list in NTRIP Caster)
- *  Request Reference Data 
- * 
- * 
+ *  NTRIP client for M5Stack (M5Unified + WPS)
+ *  - Connects to NTRIP caster and forwards RTCM data to Serial2
+ *  - LCD status display with byte counter and bps
+ *  - Uses WPS for WiFi setup
  */
-//#include <ESP8266WiFi.h>  //Need for ESP8266
-#include "NTRIPClient.h"
-#include <M5Stack.h>
+#include <M5Unified.h>
+#include <WiFi.h>
+#include "esp_wps.h"
 #include "wpsConnector.h"
-int uart_bps=115200;
+#include "NTRIPClient.h"
 
+NTRIPClient ntrip_c;
+
+// ---- NTRIP Server Config ----
 char* host     = "rtk.toiso.fit";
 int   httpPort = 2101;
 char* mntpnt   = "eniwa-bd982";
 char* user     = "";
 char* passwd   = "";
 
+// ---- State ----
+uint64_t totalBytes = 0;
+uint64_t lastBytes  = 0;
+unsigned long lastDataTime = 0;
+const unsigned long STALL_TIMEOUT_MS = 5000;
+int uart_bps = 115200;
+
+// bps counter
 hw_timer_t* timer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+volatile unsigned long countPerSec = 0;
+int displayBps = 0;
 
-unsigned long countnum;
-int num;
-
-void IRAM_ATTR onTimer(){
+void IRAM_ATTR onTimer() {
   portENTER_CRITICAL_ISR(&timerMux);
-  num = countnum;
-  countnum=0;
+  displayBps = countPerSec * 8;
+  countPerSec = 0;
   portEXIT_CRITICAL_ISR(&timerMux);
 }
-// https://github.com/tzapu/WiFiManager
-// WiFiAP:"M5Atom" Password:"m5atompass"
-/*
-Maybe you need WiFiAP fresh setup.
-https://github.com/espressif/arduino-esp32/issues/400#issuecomment-411076993
-
-#include <WiFi.h>
-void setup() {
-  // put your setup code here, to run once:
-WiFi.disconnect(true);   // still not erasing the ssid/pw. Will happily reconnect on next start
-WiFi.begin("0","0");       // adding this effectively seems to erase the previous stored SSID/PW
-ESP.restart();
-delay(1000);
-}
-
-void loop() {
-  // put your main code here, to run repeatedly:
-
-} 
-
-*/
-NTRIPClient ntrip_c;
-int oldnum;
 
 void setup() {
-   // put your setup code here, to run once:
-    M5.begin(true, false, true);
-    delay(10);
-    M5.Lcd.setTextSize(2);  
-    M5.Lcd.setCursor(0,0);
-    M5.Lcd.println("WiFi setup");
-    M5.Lcd.println("WPS Connecting...");
-    Serial2.begin(uart_bps, SERIAL_8N1,16,17);  
-    WiFi.begin();
-    int wificount=0;
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.print(".");
-      wificount++;
-      if (wificount == 5){
-        Serial.println("Starting WPS");
-        WiFi.disconnect();
-        wpsConnect();
-      }
-    }
-    Serial.println(WiFi.SSID());
-    Serial.println("WiFi connected");
-    Serial.println("IP address: ");
-    Serial.println(WiFi.localIP());
-    configTime(9 * 3600, 0, "ntp.nict.jp", "ntp.jst.mfeed.ad.jp");
-    //if you get here you have connected to the WiFi    
-    Serial.println("connected...yeey :)");
-    M5.Lcd.println("connected...yeey :)");
-    Serial.println(mntpnt);
-    Serial.println("Requesting SourceTable.");
-    M5.Lcd.println("Requesting SourceTable.");
-    if(ntrip_c.reqSrcTbl(host,httpPort)){
-      char buffer[512];
-      delay(5);
-      while(ntrip_c.available()){
-        ntrip_c.readLine(buffer,sizeof(buffer));
-        Serial.print(buffer);
-      }
-    } else {
-      Serial.println("SourceTable request error");
-      M5.Lcd.print("SourceTable request error");
-    }
-    Serial.print("Requesting SourceTable is OK\n");
-    M5.Lcd.print("Requesting SourceTable is OK\n");
-    ntrip_c.stop();
+  auto cfg = M5.config();
+  M5.begin(cfg);
+  Serial.begin(115200);
+  Serial2.begin(uart_bps, SERIAL_8N1, 16, 17);
 
-    Serial.println("Requesting MountPoint's Raw data");
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.setCursor(0,0);
-    M5.Lcd.print("ntrip://");
-    M5.Lcd.print(host);
-    M5.Lcd.print(":");
-    M5.Lcd.print(httpPort);
-    M5.Lcd.print("/");
-    M5.Lcd.println(mntpnt);
-    if(!ntrip_c.reqRaw(host,httpPort,mntpnt,user,passwd)){
-      delay(10000);
-      ESP.restart();
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("WiFi WPS connecting...");
+
+  WiFi.begin();
+  int wificount = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    wificount++;
+    if (wificount == 5) {
+      Serial.println("Starting WPS");
+      WiFi.disconnect();
+      wpsConnect();
     }
-    timer =timerBegin(0,getApbFrequency()/1000000,true);
-    timerAttachInterrupt(timer,&onTimer,true);
-    timerAlarmWrite(timer,1000000*1,true);
-    timerAlarmEnable(timer);
-    timerRestart(timer);
+  }
+  Serial.print("WiFi connected: ");
+  Serial.println(WiFi.localIP());
+  M5.Display.println("WiFi connected!");
+  configTime(9 * 3600, 0, "ntp.nict.jp", "ntp.jst.mfeed.ad.jp");
+
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(0, 0);
+  M5.Display.printf("ntrip://%s:%d/%s\n", host, httpPort, mntpnt);
+
+  Serial.printf("Connecting: %s:%d/%s\n", host, httpPort, mntpnt);
+
+  if (!ntrip_c.reqRaw(host, httpPort, mntpnt, user, passwd)) {
+    Serial.println("NTRIP connection failed");
+    M5.Display.println("NTRIP FAILED");
+    delay(10000);
+    ESP.restart();
+  }
+
+  Serial.println("NTRIP connected!");
+  M5.Display.println("NTRIP connected!");
+  lastDataTime = millis();
+
+  timer = timerBegin(0, getApbFrequency() / 1000000, true);
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, 1000000, true);
+  timerAlarmEnable(timer);
 }
 
 void loop() {
   M5.update();
-  M5.Lcd.setTextSize(4);
-  M5.Lcd.setCursor(0,48);
-  while(ntrip_c.available()) {
+
+  while (ntrip_c.available()) {
     char ch = ntrip_c.read();
-    countnum++;
     Serial2.print(ch);
+    totalBytes++;
+    portENTER_CRITICAL(&timerMux);
+    countPerSec++;
+    portEXIT_CRITICAL(&timerMux);
   }
   Serial2.flush();
-  /*
-   *  512*8 buffer
-   * 
-  while(ntrip_c.available()) {
-    rtcmData[rtcmCount++] = ntrip_c.read();
-    if (rtcmCount == sizeof(rtcmData)){
-      rtcmCount = 0;
-      break;
-    }
+
+  unsigned long now = millis();
+
+  if (totalBytes > lastBytes) {
+    lastBytes = totalBytes;
+    lastDataTime = now;
   }
 
- if (rtcmCount>2048){
-    for(size_t i=0 ; i <= rtcmCount ; i++){
-      Serial2.print(rtcmData[i]);
-    }
-    count++;
-  }*/
+  bool stalled = (now - lastDataTime > STALL_TIMEOUT_MS);
 
- // Serial.println(countnum);
- if (oldnum!=num){
-    //M5.Lcd.print(countnum);
-    M5.Lcd.print(num*8);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.print(" B/s");
-    M5.Lcd.setCursor(0,224);
-    M5.Lcd.print("RS232c:");
-    M5.Lcd.print(uart_bps);
-    M5.Lcd.println("bps");
-    num==oldnum;
- }
+  if (!ntrip_c.connected()) {
+    Serial.println("NTRIP disconnected, restarting...");
+    M5.Display.println("\nDISCONNECTED");
+    delay(5000);
+    ESP.restart();
+  }
+
+  if (stalled && (now - lastDataTime > 30000)) {
+    Serial.println("Stalled 30s, restarting...");
+    ntrip_c.stop();
+    delay(1000);
+    ESP.restart();
+  }
+
+  // Update display
+  static unsigned long lastPrint = 0;
+  if (now - lastPrint >= 1000) {
+    M5.Display.setTextSize(4);
+    M5.Display.setCursor(0, 48);
+    M5.Display.printf("%d    ", displayBps);
+    M5.Display.setTextSize(2);
+    M5.Display.print("bps");
+
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(0, 100);
+    M5.Display.printf("Total: %llu bytes  ", totalBytes);
+    M5.Display.setCursor(0, 112);
+    M5.Display.printf("Status: %s    ", stalled ? "STALLED!" : "OK");
+
+    M5.Display.setCursor(0, 224);
+    M5.Display.setTextSize(2);
+    M5.Display.printf("RS232c: %dbps", uart_bps);
+
+    lastPrint = now;
+  }
+
+  delay(10);
 }
