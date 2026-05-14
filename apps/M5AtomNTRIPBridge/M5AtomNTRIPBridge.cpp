@@ -26,14 +26,19 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include "NTRIPClient.h"
+#include "NTRIPConfig.h"
+#include "NTRIPConfigPortal.h"
 #include "M5Atom.h"
 
 // ---- NTRIP 設定 ----
-char* host    = "rtk.toiso.fit";
-int   httpPort = 2101;
-char* mntpnt  = "eniwa-bd982";
-char* user    = "";
-char* passwd  = "";
+// 値は NVS から起動時にロード。空ならポータルを強制起動。
+NTRIPConfig g_cfg;
+
+// 起動時 / 長押し時に立てる設定ポータル AP の SSID / パスワード。
+// SSID にはチップ ID を末尾4桁つけて個体を区別する。
+String g_portalSsid;
+const char* PORTAL_PASSWORD = "configme123";
+const uint32_t PORTAL_TIMEOUT_MS = 5UL * 60UL * 1000UL;  // 5 分
 
 NTRIPClient ntrip_c;
 uint8_t DisBuff[2 + 5 * 5 * 3];
@@ -85,6 +90,8 @@ uint16_t            hueDeg            = 0;
   void handleWifiDown();
   void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t &r, uint8_t &g, uint8_t &b);
   void setBuff(uint8_t Rdata, uint8_t Gdata, uint8_t Bdata);
+  void runConfigPortal();
+  void checkPortalButton();
 
 void setup() {
   Serial.begin(115200);
@@ -95,6 +102,15 @@ void setup() {
   setBuff(0x00, 0x00, 0x00);
   pinMode(0, OUTPUT);
   digitalWrite(0, LOW);
+
+  // Chip ID 末尾でユニークな AP 名にする
+  uint64_t chipId = ESP.getEfuseMac();
+  char ssidBuf[24];
+  snprintf(ssidBuf, sizeof(ssidBuf), "NTRIP-Bridge-%04X", (uint16_t)(chipId & 0xFFFF));
+  g_portalSsid = ssidBuf;
+
+  // ---- NTRIP 設定をロード ----
+  g_cfg.load();
 
   // ---- WiFiManager ----
   setBuff(0x00, 0x00, 0x40); // 設定ポータル中:青
@@ -115,6 +131,19 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
+  // NTRIP 設定が未保存ならポータルを起動 (WiFi STA を一度切って AP モード)
+  if (!g_cfg.isComplete()) {
+    Serial.println("NTRIP 設定が空です。設定ポータルを起動します。");
+    runConfigPortal();
+    // ポータル後は STA で再接続
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+    unsigned long t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+      delay(200);
+    }
+  }
+
   randomSeed(esp_random());
   lastConnectAttempt = millis() - INITIAL_BACKOFF_MS;
   backoffMs = 0;
@@ -125,6 +154,9 @@ void setup() {
 
 void loop() {
   M5.update();
+
+  // 物理ボタン (G39) の長押しで設定ポータルに突入
+  checkPortalButton();
 
   // 受信機からの NMEA は NTRIP 状態に関係なく常に Serial2 へ流す
   pumpNmeaToSerial2();
@@ -202,10 +234,18 @@ void loop() {
   M5.dis.displaybuff(DisBuff);
   lastConnectAttempt = millis();
 
-  Serial.printf("NTRIP接続試行 (連続失敗: %d回)\n", consecutiveFailures);
+  Serial.printf("NTRIP接続試行 %s:%u/%s (連続失敗: %d回)\n",
+                g_cfg.host.c_str(), g_cfg.port, g_cfg.mountpoint.c_str(),
+                consecutiveFailures);
   ntrip_c.stop();
   delay(50);
-  if (ntrip_c.reqRaw(host, httpPort, mntpnt, user, passwd)) {
+  // NTRIPClient::reqRaw は legacy signature で char*/int& を受けるので変換用ローカルを使う
+  int portTmp = g_cfg.port;
+  if (ntrip_c.reqRaw(
+        (char*)g_cfg.host.c_str(), portTmp,
+        (char*)g_cfg.mountpoint.c_str(),
+        (char*)g_cfg.user.c_str(),
+        (char*)g_cfg.passwd.c_str())) {
     Serial.println("NTRIP接続成功");
     lastDataTime         = millis();
     consecutiveFailures  = 0;
@@ -311,4 +351,60 @@ void setBuff(uint8_t Rdata, uint8_t Gdata, uint8_t Bdata) {
     DisBuff[2 + i * 3 + 1] = Rdata;
     DisBuff[2 + i * 3 + 2] = Bdata;
   }
+}
+
+// G39 (M5.Btn) を 2 秒長押しで設定ポータルへ
+void checkPortalButton() {
+  static unsigned long pressedAt = 0;
+  if (M5.Btn.isPressed()) {
+    if (pressedAt == 0) pressedAt = millis();
+    if (millis() - pressedAt > 2000) {
+      // 確実にトリガーが認識されたことを示すため一度紫点灯
+      setBuff(0x40, 0x00, 0x40);
+      M5.dis.displaybuff(DisBuff);
+      // ボタンが離されるまで待つ (再トリガー防止)
+      while (M5.Btn.isPressed()) { M5.update(); delay(20); }
+      // 接続中の NTRIP を畳んでポータルへ
+      ntrip_c.stop();
+      ntripConnected = false;
+      runConfigPortal();
+      // ポータル後は STA に戻して再接続
+      WiFi.mode(WIFI_STA);
+      WiFi.begin();
+      unsigned long t0 = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+        delay(200);
+      }
+      pressedAt = 0;
+    }
+  } else {
+    pressedAt = 0;
+  }
+}
+
+void runConfigPortal() {
+#if NTRIP_CONFIG_PORTAL_AVAILABLE
+  // 設定中であることを LED で明示 (シアン点滅)
+  setBuff(0x00, 0x40, 0x40);
+  M5.dis.displaybuff(DisBuff);
+
+  Serial.println("====================================");
+  Serial.printf("[Portal] Connect WiFi to:\n");
+  Serial.printf("  SSID: %s\n", g_portalSsid.c_str());
+  Serial.printf("  PASS: %s\n", PORTAL_PASSWORD);
+  Serial.printf("  URL : http://192.168.4.1/\n");
+  Serial.println("====================================");
+
+  NTRIPConfigPortal portal;
+  bool changed = portal.run(g_cfg, g_portalSsid, PORTAL_PASSWORD, PORTAL_TIMEOUT_MS);
+  if (changed) {
+    Serial.println("[Portal] 設定を保存しました。再起動します。");
+    delay(1500);
+    ESP.restart();
+  } else {
+    Serial.println("[Portal] timeout / 変更なしで戻ります。");
+  }
+#else
+  Serial.println("[Portal] not compiled in (missing ESPAsyncWebServer dep)");
+#endif
 }

@@ -16,6 +16,8 @@ end
 subgraph group_core["Library core"]
   node_src_ntrip["NTRIPClient<br/>[src/NTRIPClient.cpp]"]
   node_src_ntrip_h["Client API<br/>[src/NTRIPClient.h]"]
+  node_src_cfg["NTRIPConfig<br/>NVS-backed settings<br/>[src/NTRIPConfig.cpp]"]
+  node_src_portal["NTRIPConfigPortal<br/>captive AP + Web UI<br/>[src/NTRIPConfigPortal.cpp]"]
 end
 
 subgraph group_example["Library example"]
@@ -36,13 +38,20 @@ subgraph group_external["External systems"]
 end
 
 node_repo -->|"packages"| node_src_ntrip
+node_repo -->|"packages"| node_src_cfg
+node_repo -->|"packages"| node_src_portal
 node_repo -->|"ships"| node_basic
 node_src_ntrip -->|"API"| node_src_ntrip_h
+node_src_portal -->|"persists via"| node_src_cfg
 node_basic -->|"uses"| node_src_ntrip
-node_app_atom_client -->|"symlinks"| node_src_ntrip
-node_app_atom_bridge -->|"symlinks"| node_src_ntrip
-node_app_stack_client -->|"symlinks"| node_src_ntrip
-node_app_stack_bridge -->|"symlinks"| node_src_ntrip
+node_app_atom_client -->|"uses"| node_src_ntrip
+node_app_atom_bridge -->|"uses"| node_src_ntrip
+node_app_atom_bridge -->|"loads cfg"| node_src_cfg
+node_app_atom_bridge -->|"opens portal"| node_src_portal
+node_app_stack_client -->|"uses"| node_src_ntrip
+node_app_stack_bridge -->|"uses"| node_src_ntrip
+node_app_stack_bridge -->|"loads cfg"| node_src_cfg
+node_app_stack_bridge -->|"opens portal"| node_src_portal
 node_src_ntrip -->|"fetches RTCM3"| node_caster
 node_caster -->|"rides on"| node_wifi
 node_app_atom_client -->|"forwards RTCM3"| node_gnss
@@ -64,7 +73,7 @@ classDef toneMint fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
 classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
 classDef toneRose fill:#ffe4e6,stroke:#e11d48,stroke-width:1.5px,color:#881337
 class node_repo toneBlue
-class node_src_ntrip,node_src_ntrip_h toneAmber
+class node_src_ntrip,node_src_ntrip_h,node_src_cfg,node_src_portal toneAmber
 class node_basic toneMint
 class node_app_atom_client,node_app_atom_bridge,node_app_stack_client,node_app_stack_bridge toneIndigo
 class node_caster,node_wifi,node_gnss toneRose
@@ -92,9 +101,11 @@ arduino-cli lib install --git-url https://github.com/yasunorioi/NTRIP-client-for
 | Library | Required by |
 |---------|-------------|
 | WiFi (built-in)                                       | `examples/Basic` and all `apps/*` |
+| Preferences (built-in)                                | `NTRIPConfig` (loaded by `apps/*Bridge`) |
 | [M5Unified](https://github.com/m5stack/M5Unified)     | `apps/M5Stack*` |
 | [M5Atom](https://github.com/m5stack/M5Atom) + [FastLED](https://github.com/FastLED/FastLED) | `apps/M5Atom*` |
 | [WiFiManager](https://github.com/tzapu/WiFiManager)   | all `apps/*` |
+| [ESPAsyncWebServer](https://github.com/ESP32Async/ESPAsyncWebServer) + [AsyncTCP](https://github.com/ESP32Async/AsyncTCP) | `NTRIPConfigPortal` (used by `apps/*Bridge`) |
 
 ## Apps
 
@@ -121,6 +132,23 @@ pio device monitor             # シリアルモニタ
 WiFi 設定は WiFiManager:
 - **M5Atom 版**: 未設定/接続失敗時に AP `M5Atom-NTRIP` (Bridge は `M5Atom-NTRIP-Bridge`) が立ち上がる。
 - **M5Stack 版**: 起動時に BtnA を 2 秒押しでその場で設定ポータル (`NTRIP-Client` / `NTRIP-Bridge`)。押さなければ前回設定で接続。
+
+### NTRIP 設定 (Bridge アプリのみ)
+
+Bridge 系 (`M5AtomNTRIPBridge` / `M5StackNTRIPBridge`) は NTRIP 接続先 (host/port/mountpoint/user/passwd) と VRS 関連設定を NVS に永続化する。値は `src/NTRIPConfig.{h,cpp}` の `NTRIPConfig` 構造体で管理し、Web UI で編集する。
+
+初回起動 or 設定が空のとき:
+1. WiFi が繋がった直後、自動で設定ポータル AP `NTRIP-Bridge-XXXX` (XXXX は chip ID 末尾) が立ち上がる。
+2. パスワード: `configme123`。M5Stack なら LCD に WiFi-join 用 QR コードを表示するのでスマホでスキャン (キャプティブポータルで自動的にフォームへ遷移)。M5Atom はシリアルログに SSID/PASS/URL を出す。
+3. フォームに入力して **Save & Reboot** → デバイスは home WiFi に戻って NTRIP 接続を開始する。
+
+運用中に再設定したいとき:
+- **M5Stack**: BtnB を 2 秒長押し → 設定モードに切替
+- **M5Atom**: 本体ボタン (G39) を 2 秒長押し → 設定モードに切替
+
+設定モード中は NTRIP ストリームが一時停止する (AP/STA 同時運用しない単純設計)。Web UI には Factory Reset ボタンもあり、NVS をクリアして初期状態に戻す。
+
+Client 系 (`M5AtomNTRIPClient` / `M5StackNTRIPClient`) は最小リファレンスとしてハードコード設定のままで、NTRIPConfigPortal は使わない。
 
 ## Misc
 

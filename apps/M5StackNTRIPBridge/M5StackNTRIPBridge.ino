@@ -21,13 +21,17 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include "NTRIPClient.h"
+#include "NTRIPConfig.h"
+#include "NTRIPConfigPortal.h"
 
 // ---- NTRIP 設定 ----
-char* host     = "rtk.toiso.fit";
-int   httpPort = 2101;
-char* mntpnt   = "eniwa-bd982";
-char* user     = "";
-char* passwd   = "";
+// 値は NVS から起動時にロード。空ならポータルを強制起動。
+NTRIPConfig g_cfg;
+
+// 設定ポータル AP 情報 (SSID は chip ID 4 桁付き)
+String g_portalSsid;
+const char*    PORTAL_PASSWORD    = "configme123";
+const uint32_t PORTAL_TIMEOUT_MS  = 5UL * 60UL * 1000UL;  // 5 分
 
 NTRIPClient ntrip_c;
 
@@ -87,6 +91,9 @@ void scheduleRetry(bool increase);
 void handleWifiDown();
 const char* stateLabel(AppState s);
 uint16_t stateColor(AppState s);
+void runConfigPortal();
+void drawPortalScreen();
+void checkPortalButton();
 
 void setup() {
   auto cfg = M5.config();
@@ -95,6 +102,15 @@ void setup() {
   Serial2.begin(UART_BPS, SERIAL_8N1, PORTA_RX_PIN, PORTA_TX_PIN);
   SerialRS232.begin(UART_BPS, SERIAL_8N1, RS232F_RX_PIN, RS232F_TX_PIN);
 
+  // Chip ID 末尾 4 桁でユニークな AP 名にする
+  uint64_t chipId = ESP.getEfuseMac();
+  char ssidBuf[24];
+  snprintf(ssidBuf, sizeof(ssidBuf), "NTRIP-Bridge-%04X", (uint16_t)(chipId & 0xFFFF));
+  g_portalSsid = ssidBuf;
+
+  // NVS から NTRIP 設定をロード
+  g_cfg.load();
+
   M5.Display.setRotation(1);
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
@@ -102,6 +118,18 @@ void setup() {
   M5.Display.println("M5Stack NTRIP Bridge");
 
   setupWiFi();
+
+  // NTRIP 設定が未保存ならポータルを起動
+  if (!g_cfg.isComplete()) {
+    Serial.println("NTRIP 設定が空です。設定ポータルを起動します。");
+    runConfigPortal();
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+    unsigned long t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+      delay(200);
+    }
+  }
 
   randomSeed(esp_random());
   lastConnectAttempt = millis() - INITIAL_BACKOFF_MS;
@@ -116,6 +144,9 @@ void setup() {
 
 void loop() {
   M5.update();
+
+  // BtnB 長押しで設定ポータルへ
+  checkPortalButton();
 
   // 受信機からの NMEA は NTRIP 状態に関係なく常に RS232F 側へ流す
   pumpNmeaToRs232f();
@@ -188,11 +219,18 @@ void loop() {
   state = AppState::Connecting;
   drawStatus();
   lastConnectAttempt = millis();
-  Serial.printf("NTRIP接続試行 (連続失敗: %d回)\n", consecutiveFailures);
+  Serial.printf("NTRIP接続試行 %s:%u/%s (連続失敗: %d回)\n",
+                g_cfg.host.c_str(), g_cfg.port, g_cfg.mountpoint.c_str(),
+                consecutiveFailures);
 
   ntrip_c.stop();
   delay(50);
-  if (ntrip_c.reqRaw(host, httpPort, mntpnt, user, passwd)) {
+  int portTmp = g_cfg.port;
+  if (ntrip_c.reqRaw(
+        (char*)g_cfg.host.c_str(), portTmp,
+        (char*)g_cfg.mountpoint.c_str(),
+        (char*)g_cfg.user.c_str(),
+        (char*)g_cfg.passwd.c_str())) {
     Serial.println("NTRIP接続成功");
     lastDataTime         = millis();
     consecutiveFailures  = 0;
@@ -267,7 +305,8 @@ void drawHeader() {
   M5.Display.setCursor(0, 0);
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(WHITE, BLACK);
-  M5.Display.printf("ntrip://%s:%d/%s\n", host, httpPort, mntpnt);
+  M5.Display.printf("ntrip://%s:%u/%s\n",
+                    g_cfg.host.c_str(), g_cfg.port, g_cfg.mountpoint.c_str());
   M5.Display.printf("IP %s  A=%d/%d  RS232F=%d/%d\n",
                     WiFi.localIP().toString().c_str(),
                     PORTA_RX_PIN, PORTA_TX_PIN,
@@ -396,4 +435,84 @@ void handleWifiDown() {
     Serial.println("WiFi再接続失敗。少し待ってから再試行。");
     delay(5000);
   }
+}
+
+// BtnB 長押し (2 秒) で設定ポータルへ
+void checkPortalButton() {
+  static unsigned long pressedAt = 0;
+  if (M5.BtnB.isPressed()) {
+    if (pressedAt == 0) pressedAt = millis();
+    if (millis() - pressedAt > 2000) {
+      // ボタン離されるまで待ち、現セッションを畳んでポータルへ
+      while (M5.BtnB.isPressed()) { M5.update(); delay(20); }
+      ntrip_c.stop();
+      ntripConnected = false;
+      runConfigPortal();
+      WiFi.mode(WIFI_STA);
+      WiFi.begin();
+      unsigned long t0 = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+        delay(200);
+      }
+      M5.Display.fillScreen(BLACK);
+      drawHeader();
+      drawStatus();
+      pressedAt = 0;
+    }
+  } else {
+    pressedAt = 0;
+  }
+}
+
+// ポータル中の LCD: AP情報 + WiFi-join QR + URL
+void drawPortalScreen() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("CONFIG MODE");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 24);
+  M5.Display.printf("SSID: %s\n", g_portalSsid.c_str());
+  M5.Display.printf("PASS: %s\n", PORTAL_PASSWORD);
+  M5.Display.println("URL : http://192.168.4.1/");
+  M5.Display.println("");
+  M5.Display.println("Scan QR to join WiFi");
+
+  // WiFi-join QR (標準形式): スキャンするとスマホが自動でAPに接続する
+  String wifiQr = "WIFI:T:WPA;S:" + g_portalSsid + ";P:" + String(PORTAL_PASSWORD) + ";;";
+  // 画面右側に配置: 140x140 程度
+  M5.Display.qrcode(wifiQr.c_str(), 170, 80, 140, 6);
+}
+
+void runConfigPortal() {
+#if NTRIP_CONFIG_PORTAL_AVAILABLE
+  drawPortalScreen();
+
+  Serial.println("====================================");
+  Serial.printf("[Portal] Connect WiFi to:\n");
+  Serial.printf("  SSID: %s\n", g_portalSsid.c_str());
+  Serial.printf("  PASS: %s\n", PORTAL_PASSWORD);
+  Serial.printf("  URL : http://192.168.4.1/\n");
+  Serial.println("====================================");
+
+  NTRIPConfigPortal portal;
+  bool changed = portal.run(g_cfg, g_portalSsid, PORTAL_PASSWORD, PORTAL_TIMEOUT_MS);
+  if (changed) {
+    Serial.println("[Portal] 設定を保存しました。再起動します。");
+    M5.Display.fillScreen(BLACK);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(0, 100);
+    M5.Display.setTextColor(GREEN, BLACK);
+    M5.Display.println(" Saved. Rebooting...");
+    delay(1500);
+    ESP.restart();
+  } else {
+    Serial.println("[Portal] timeout / 変更なしで戻ります。");
+  }
+#else
+  Serial.println("[Portal] not compiled in (missing ESPAsyncWebServer dep)");
+#endif
 }
