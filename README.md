@@ -144,21 +144,25 @@ arduino-cli lib install --git-url https://github.com/yasunorioi/NTRIP-client-for
 このリポジトリの NTRIPClient ライブラリを `symlink://../..` で直接参照しているため、
 ライブラリ側の変更がそのままビルドに反映される。
 
-| App | Hardware | Output | 用途 |
+| App | Hardware | Pinout | 用途 |
 |-----|----------|--------|------|
-| `M5AtomNTRIPClient` | M5Atom Lite/Matrix | (RS232基板なし) | NTRIP受信のみのリファレンス実装。指数バックオフ・ジッター・ストール検知付きで4G回線でも安定動作 |
-| `M5AtomNTRIPBridge` | M5Atom + 外部RTK受信機 | Serial2 (G22 TX) に NMEA を出力 | NTRIP→RTK受信機→NMEA の双方向ブリッジ。RTCM受信レートに応じて LED の色相がシフト |
+| `M5AtomNTRIPClient`  | M5Atom Lite/Matrix          | Serial2 G22(RX)/G19(TX) | NTRIP受信のみのリファレンス実装。指数バックオフ・ジッター・ストール検知付きで4G回線でも安定動作 |
+| `M5AtomNTRIPBridge`  | M5Atom + 外部RTK受信機       | Serial3 G26/G32 (受信機) ・ Serial2 G22 TX (NMEA出力) | NTRIP↔RTK受信機↔NMEA の双方向ブリッジ。RTCM受信レートに応じて LED の色相がシフト |
+| `M5StackNTRIPClient` | M5Stack Basic               | PORT.A G21(RX)/G22(TX)  | M5AtomNTRIPClient の M5Stack 版。LCDに状態・スループット表示。Atom版と同じGroveケーブルで RTK 受信機に接続できるよう 21/22 に揃えてある |
+| `M5StackNTRIPBridge` | M5Stack Basic + [RS232F Module 13.2](https://www.switch-science.com/products/8965) | PORT.A G21/G22 (受信機) ・ RS232F G17 TX (NMEA→DB9) | M5AtomNTRIPBridge の M5Stack 版。受信機との通信は PORT.A、拾った NMEA は底面 RS232F モジュール経由で DB9 から外部へ |
 
 ### ビルド
 
 ```bash
-cd apps/M5AtomNTRIPClient    # または apps/M5AtomNTRIPBridge
-pio run                       # ビルド
-pio run -t upload             # 書き込み
+cd apps/M5AtomNTRIPClient     # または M5AtomNTRIPBridge / M5StackNTRIPClient / M5StackNTRIPBridge
+pio run                        # ビルド
+pio run -t upload              # 書き込み
 pio device monitor             # シリアルモニタ
 ```
 
-WiFi未設定時は AP `M5Atom-NTRIP` が立ち上がるので、スマホ等からブラウザで SSID/パスワードを設定する。
+WiFi 設定は WiFiManager:
+- **M5Atom 版**: 未設定/接続失敗時に AP `M5Atom-NTRIP` (Bridge は `M5Atom-NTRIP-Bridge`) が立ち上がる。
+- **M5Stack 版**: 起動時に BtnA を 2 秒押しでその場で設定ポータル (`NTRIP-Client` / `NTRIP-Bridge`)。押さなければ前回設定で接続。
 
 ## Misc
 
