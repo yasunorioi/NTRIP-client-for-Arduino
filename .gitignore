@@ -38,3 +38,14 @@
 debug.cfg
 debug_custom.json
 esp32.svd
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VSCode (generated/local)
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/

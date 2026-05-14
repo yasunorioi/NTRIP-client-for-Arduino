@@ -138,6 +138,28 @@ arduino-cli lib install --git-url https://github.com/yasunorioi/NTRIP-client-for
 | [M5Atom](https://github.com/m5stack/M5Atom) | M5Atom examples |
 | [WiFiManager](https://github.com/tzapu/WiFiManager) | WiFiManager examples |
 
+## Apps
+
+`apps/` 配下は、`examples/` には収まらない規模の PlatformIO プロジェクトを置く場所。
+このリポジトリの NTRIPClient ライブラリを `symlink://../..` で直接参照しているため、
+ライブラリ側の変更がそのままビルドに反映される。
+
+| App | Hardware | Output | 用途 |
+|-----|----------|--------|------|
+| `M5AtomNTRIPClient` | M5Atom Lite/Matrix | (RS232基板なし) | NTRIP受信のみのリファレンス実装。指数バックオフ・ジッター・ストール検知付きで4G回線でも安定動作 |
+| `M5AtomNTRIPBridge` | M5Atom + 外部RTK受信機 | Serial2 (G22 TX) に NMEA を出力 | NTRIP→RTK受信機→NMEA の双方向ブリッジ。RTCM受信レートに応じて LED の色相がシフト |
+
+### ビルド
+
+```bash
+cd apps/M5AtomNTRIPClient    # または apps/M5AtomNTRIPBridge
+pio run                       # ビルド
+pio run -t upload             # 書き込み
+pio device monitor             # シリアルモニタ
+```
+
+WiFi未設定時は AP `M5Atom-NTRIP` が立ち上がるので、スマホ等からブラウザで SSID/パスワードを設定する。
+
 ## Misc
 
 ### kubota WRH1200A
