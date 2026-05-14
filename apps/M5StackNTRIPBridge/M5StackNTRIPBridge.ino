@@ -66,11 +66,23 @@ unsigned long lastReportTime       = 0;
 float         lastRtcmBps          = 0.0f;
 float         lastNmeaBps          = 0.0f;
 
+// ---- トラクターアニメーション ----
+// RTCM3 受信量に比例して画面最下部をトラクターが左→右に進む。
+constexpr int TRACTOR_W            = 24;
+constexpr int TRACTOR_H            = 16;
+constexpr int TRACTOR_Y            = 220;
+constexpr uint64_t BYTES_PER_PIXEL = 200;  // 200 B/px → 1KB/s で 5 px/秒
+
+int           lastTractorX    = -TRACTOR_W;
+unsigned long lastTractorTick = 0;
+
 // ---- プロトタイプ ----
 void setupWiFi();
 void pumpNmeaToRs232f();
 void drawHeader();
 void drawStatus();
+void drawTractor(int x, int y);
+void updateTractor(uint64_t totalBytes);
 void scheduleRetry(bool increase);
 void handleWifiDown();
 const char* stateLabel(AppState s);
@@ -127,6 +139,7 @@ void loop() {
       rtcmBytesSinceReport++;
     }
     Serial2.flush();
+    updateTractor(rtcmBytesTotal);
 
     unsigned long now = millis();
 
@@ -312,6 +325,31 @@ uint16_t stateColor(AppState s) {
     case AppState::WifiDown:   return RED;
   }
   return WHITE;
+}
+
+void drawTractor(int x, int y) {
+  // 24x16 のサイドビュー: 排気煙突 + キャブ + 車体 + 前後輪
+  M5.Display.fillRect(x,      y + 8, 24, 5, YELLOW);
+  M5.Display.fillRect(x + 10, y,      8, 8, YELLOW);
+  M5.Display.drawRect(x + 10, y,      8, 8, DARKGREY);
+  M5.Display.fillRect(x + 8,  y + 1,  2, 5, DARKGREY);
+  M5.Display.fillCircle(x + 19, y + 14, 3, DARKGREY);
+  M5.Display.fillCircle(x + 19, y + 14, 1, BLACK);
+  M5.Display.fillCircle(x + 5,  y + 14, 2, DARKGREY);
+}
+
+void updateTractor(uint64_t totalBytes) {
+  unsigned long now = millis();
+  if (now - lastTractorTick < 50) return;
+  lastTractorTick = now;
+
+  int w = M5.Display.width();
+  int x = (int)((totalBytes / BYTES_PER_PIXEL) % (uint64_t)w);
+  if (x == lastTractorX) return;
+
+  M5.Display.fillRect(0, TRACTOR_Y, w, TRACTOR_H + 2, BLACK);
+  drawTractor(x, TRACTOR_Y);
+  lastTractorX = x;
 }
 
 void scheduleRetry(bool increase) {
