@@ -196,6 +196,29 @@ void loop() {
   }
 }
 
+// WiFiManager のポータル AP が立った瞬間に呼ばれる。LCD に WiFi-join QR
+// を出してスマホからすぐ参加できるようにする。
+void drawWifiManagerQr(const char* ssid) {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("WiFi SETUP");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 24);
+  M5.Display.printf("SSID: %s\n", ssid);
+  M5.Display.println("PASS: (open)");
+  M5.Display.println("URL : http://192.168.4.1/");
+  M5.Display.println("");
+  M5.Display.println("Scan QR to join WiFi");
+
+  // open AP なので nopass。WIFI: の標準形式。
+  String wifiQr = "WIFI:T:nopass;S:" + String(ssid) + ";;";
+  M5.Display.qrcode(wifiQr.c_str(), 170, 80, 140, 6);
+}
+
 void setupWiFi() {
   M5.Display.setTextSize(2);
   M5.Display.println("");
@@ -219,10 +242,11 @@ void setupWiFi() {
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
 
+  // ポータル AP が立った瞬間に LCD に QR + AP情報を表示
+  wm.setAPCallback([](WiFiManager* /*mgr*/) { drawWifiManagerQr("NTRIP-Client"); });
+
   M5.Display.println("");
   if (doManualConfig) {
-    M5.Display.println("Config portal:");
-    M5.Display.println("SSID NTRIP-Client");
     wm.startConfigPortal("NTRIP-Client");
   } else {
     M5.Display.println("Connecting WiFi...");
