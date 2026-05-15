@@ -6,17 +6,45 @@
 
 namespace {
 
-// JSON から `"key":"value"` の value 部分を取り出す。文字列フィールド限定。
-// 入れ子・エスケープには対応しないが、GitHub API のレスポンス上は値に "
-// が含まれない (URL は \u エスケープされない) ため十分。
+// JSON から `"key":"value"` の value 部分を取り出す。escape 対応版。
+// release notes (body) は \n や \" を含むため、ナイーブな indexOf("\"") では
+// 終了位置を取り違える。ここではエスケープを正しくスキップし、最後に \\n
+// → \n、\\r → \r、\\" → "、\\\\ → \\ にデコードする。\u はサポート外
+// (出てきたらそのまま残す)。
 String extractStr(const String& json, const String& key) {
   String pat = "\"" + key + "\":\"";
   int p = json.indexOf(pat);
   if (p < 0) return String();
-  int start = p + pat.length();
-  int end   = json.indexOf("\"", start);
-  if (end < 0) return String();
-  return json.substring(start, end);
+  int i = p + pat.length();
+
+  String out;
+  out.reserve(64);
+  while (i < (int)json.length()) {
+    char c = json.charAt(i);
+    if (c == '\\') {
+      if (i + 1 >= (int)json.length()) break;
+      char esc = json.charAt(i + 1);
+      switch (esc) {
+        case 'n':  out += '\n'; break;
+        case 'r':  out += '\r'; break;
+        case 't':  out += '\t'; break;
+        case '"':  out += '"';  break;
+        case '\\': out += '\\'; break;
+        case '/':  out += '/';  break;
+        default:
+          // 未対応: \uXXXX 等はそのまま落とす (簡易実装)
+          break;
+      }
+      i += 2;
+    } else if (c == '"') {
+      // 終端
+      return out;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;  // 終端 " 見つからずに終わった場合 (壊れた JSON)
 }
 
 }  // namespace
@@ -63,6 +91,7 @@ GitHubReleaseInfo GitHubRelease::fetchLatest(const String& ownerRepo,
   info.name        = extractStr(body, "name");
   info.publishedAt = extractStr(body, "published_at");
   info.htmlUrl     = extractStr(body, "html_url");
+  info.body        = extractStr(body, "body");
 
   if (info.tagName.length() == 0) {
     info.error = "tag_name not found";

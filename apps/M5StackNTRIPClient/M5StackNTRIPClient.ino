@@ -19,6 +19,8 @@
  */
 #include <M5Unified.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPUpdate.h>
 #include <WiFiManager.h>
 #include "NTRIPClient.h"
 #include "GitHubRelease.h"
@@ -28,7 +30,8 @@
 #define FIRMWARE_VERSION "dev"
 #endif
 
-constexpr const char* GH_REPO = "yasunorioi/NTRIP-client-for-Arduino";
+constexpr const char* GH_REPO  = "yasunorioi/NTRIP-client-for-Arduino";
+constexpr const char* APP_NAME = "M5StackNTRIPClient";
 
 // ---- NTRIP サーバ設定 ----
 char* host     = "rtk.toiso.fit";
@@ -68,12 +71,16 @@ unsigned long lastReportTime      = 0;
 float         lastBpsShown        = 0.0f;
 
 // ---- トラクターアニメーション ----
-// RTCM3 受信量に比例して画面最下部をトラクターが左→右に進む。
-// データが止まれば totalBytes が増えないので自然に静止する。
+// RTCM3 受信量に比例して画面下部をトラクターが左→右に進む。
+// 画面最下部 (y=212-228) はボタンラベルのために空けたので、トラクターは
+// その上 (y=190-208 程度) に。データが止まれば自然に静止する。
 constexpr int TRACTOR_W           = 24;
 constexpr int TRACTOR_H           = 16;
-constexpr int TRACTOR_Y           = 220;
+constexpr int TRACTOR_Y           = 190;
 constexpr uint64_t BYTES_PER_PIXEL = 200;  // 200 B/px → 1KB/s で 5 px/秒
+
+// ---- 画面切替 (0 = ステータス, 1 = デバイス情報) ----
+volatile int currentScreen = 0;
 
 int           lastTractorX     = -TRACTOR_W;
 unsigned long lastTractorTick  = 0;
@@ -90,6 +97,10 @@ const char* stateLabel(AppState s);
 uint16_t stateColor(AppState s);
 void checkReleaseButton();
 void showReleaseInfo();
+void checkScreenSwitchButton();
+void drawCurrentScreen();
+void drawDeviceInfoScreen();
+void drawButtonLabels();
 
 void setup() {
   auto cfg = M5.config();
@@ -111,16 +122,15 @@ void setup() {
   backoffMs          = 0;
   state              = AppState::Connecting;
 
-  M5.Display.fillScreen(BLACK);
-  drawHeader();
-  drawStatus();
+  drawCurrentScreen();
   lastReportTime = millis();
 }
 
 void loop() {
   M5.update();
 
-  // BtnC 短押しでリリース情報
+  // BtnB 短押し=画面切替 / BtnC 短押し=Update
+  checkScreenSwitchButton();
   checkReleaseButton();
 
   // 1) WiFi 状態チェック
@@ -278,6 +288,7 @@ void setupWiFi() {
 }
 
 void drawHeader() {
+  if (currentScreen != 0) return;
   M5.Display.setCursor(0, 0);
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(WHITE, BLACK);
@@ -287,6 +298,7 @@ void drawHeader() {
 }
 
 void drawStatus() {
+  if (currentScreen != 0) return;
   // 中段: 状態ラベル (色付き) + バイト総数
   M5.Display.setTextSize(3);
   M5.Display.setCursor(0, 40);
@@ -349,6 +361,7 @@ void drawTractor(int x, int y) {
 }
 
 void updateTractor(uint64_t totalBytes) {
+  if (currentScreen != 0) return;
   unsigned long now = millis();
   if (now - lastTractorTick < 50) return;  // 最大 20 fps
   lastTractorTick = now;
@@ -407,24 +420,115 @@ void handleWifiDown() {
   }
 }
 
-// BtnC 短押しでリリース情報を取得→表示
+// BtnC 短押しでリリース情報→必要なら OTA フロー
 void checkReleaseButton() {
   if (M5.BtnC.wasClicked()) {
-    showReleaseInfo();
-    M5.Display.fillScreen(BLACK);
-    drawHeader();
-    drawStatus();
+    showReleaseInfo();  // OTA成功時はここで再起動して戻ってこない
+    drawCurrentScreen();
     lastTractorX = -TRACTOR_W;
   }
 }
 
-void showReleaseInfo() {
+// ---- helpers ----
+static void waitForDismiss(uint32_t ms) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    M5.update();
+    if (M5.BtnA.wasClicked() || M5.BtnB.wasClicked() || M5.BtnC.wasClicked()) break;
+    delay(20);
+  }
+}
+
+static bool waitForYesNo() {
+  while (true) {
+    M5.update();
+    if (M5.BtnA.wasClicked()) return false;
+    if (M5.BtnC.wasClicked()) return true;
+    delay(20);
+  }
+}
+
+static void drawReleaseHeader() {
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(YELLOW, BLACK);
   M5.Display.setCursor(0, 0);
   M5.Display.println("RELEASE INFO");
+}
 
+static void otaProgressCb(int cur, int total) {
+  static int lastPct = -1;
+  if (total <= 0) return;
+  int pct = (int)((int64_t)cur * 100 / total);
+  if (pct == lastPct) return;
+  lastPct = pct;
+
+  int w = M5.Display.width();
+  int barX = 10, barY = 180, barW = w - 20, barH = 24;
+  M5.Display.drawRect(barX, barY, barW, barH, WHITE);
+  int fillW = (barW - 4) * pct / 100;
+  M5.Display.fillRect(barX + 2, barY + 2, fillW, barH - 4, GREEN);
+
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 145);
+  M5.Display.printf("OTA: %3d%%  %d/%d KB    ",
+                    pct, cur / 1024, total / 1024);
+  Serial.printf("[OTA] %d%% %d/%d\n", pct, cur, total);
+}
+
+static void runOTA(const GitHubReleaseInfo& r) {
+  String url = "https://github.com/" + String(GH_REPO) +
+               "/releases/download/" + r.tagName + "/" +
+               String(APP_NAME) + "-" + r.tagName + ".bin";
+  Serial.printf("[OTA] Updating from %s\n", url.c_str());
+
+  drawReleaseHeader();
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 30);
+  M5.Display.printf("Updating to %s\n", r.tagName.c_str());
+  M5.Display.println("Downloading firmware.bin...");
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15);
+
+  httpUpdate.rebootOnUpdate(true);
+  httpUpdate.setLedPin(-1);
+  httpUpdate.onProgress(otaProgressCb);
+
+  HTTPUpdateResult ret = httpUpdate.update(client, url, FIRMWARE_VERSION);
+
+  drawReleaseHeader();
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(0, 70);
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      M5.Display.setTextColor(RED, BLACK);
+      M5.Display.println("OTA FAILED");
+      M5.Display.setTextSize(1);
+      M5.Display.printf("err %d: %s\n",
+                        httpUpdate.getLastError(),
+                        httpUpdate.getLastErrorString().c_str());
+      Serial.printf("[OTA] FAILED %d: %s\n",
+                    httpUpdate.getLastError(),
+                    httpUpdate.getLastErrorString().c_str());
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      M5.Display.setTextColor(ORANGE, BLACK);
+      M5.Display.println("NO UPDATE");
+      break;
+    case HTTP_UPDATE_OK:
+      M5.Display.setTextColor(GREEN, BLACK);
+      M5.Display.println("OTA OK");
+      break;
+  }
+  waitForDismiss(8000);
+}
+
+void showReleaseInfo() {
+  drawReleaseHeader();
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setCursor(0, 30);
@@ -434,30 +538,140 @@ void showReleaseInfo() {
 
   GitHubReleaseInfo r = GitHubRelease::fetchLatest(GH_REPO);
 
-  M5.Display.fillRect(0, 60, M5.Display.width(), 80, BLACK);
-  M5.Display.setCursor(0, 60);
-  if (r.ok) {
+  if (!r.ok) {
+    M5.Display.setTextColor(RED, BLACK);
+    M5.Display.printf("Failed: HTTP %d\n", r.httpCode);
+    M5.Display.printf("(%s)\n", r.error.c_str());
+    waitForDismiss(5000);
+    return;
+  }
+
+  bool sameVersion = (String(FIRMWARE_VERSION) == r.tagName);
+  if (sameVersion) {
+    drawReleaseHeader();
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(WHITE, BLACK);
+    M5.Display.setCursor(0, 30);
+    M5.Display.printf("Current: %s\n", FIRMWARE_VERSION);
     M5.Display.printf("Latest:  %s\n", r.tagName.c_str());
     M5.Display.printf("Date:    %s\n", r.publishedAt.substring(0, 10).c_str());
     M5.Display.println("");
     M5.Display.setTextSize(2);
-    if (String(FIRMWARE_VERSION) == r.tagName) {
-      M5.Display.setTextColor(GREEN, BLACK);
-      M5.Display.println("Up to date");
-    } else {
-      M5.Display.setTextColor(ORANGE, BLACK);
-      M5.Display.println("Update available");
-    }
-  } else {
-    M5.Display.setTextColor(RED, BLACK);
-    M5.Display.printf("Failed: HTTP %d\n", r.httpCode);
-    M5.Display.printf("(%s)\n", r.error.c_str());
+    M5.Display.setTextColor(GREEN, BLACK);
+    M5.Display.println("Up to date");
+    waitForDismiss(5000);
+    return;
   }
 
-  unsigned long t0 = millis();
-  while (millis() - t0 < 5000) {
-    M5.update();
-    if (M5.BtnA.wasClicked() || M5.BtnB.wasClicked() || M5.BtnC.wasClicked()) break;
-    delay(20);
+  // Update available: release notes + Y/N
+  drawReleaseHeader();
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 30);
+  M5.Display.printf("Current: %s -> %s\n", FIRMWARE_VERSION, r.tagName.c_str());
+  M5.Display.printf("Date: %s\n", r.publishedAt.substring(0, 10).c_str());
+  M5.Display.println("--- release notes ---");
+
+  int linesShown = 0;
+  const int MAX_LINES = 13;
+  String body = r.body;
+  int start = 0;
+  while (linesShown < MAX_LINES && start < (int)body.length()) {
+    int eol = body.indexOf('\n', start);
+    String line = (eol < 0) ? body.substring(start) : body.substring(start, eol);
+    if (line.length() > 50) line = line.substring(0, 47) + "...";
+    M5.Display.println(line);
+    linesShown++;
+    if (eol < 0) break;
+    start = eol + 1;
   }
+  if (start < (int)body.length()) {
+    M5.Display.setTextColor(DARKGREY, BLACK);
+    M5.Display.println("(truncated)");
+  }
+
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(0, 188);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.println("Update? A=No  C=Yes");
+
+  bool yes = waitForYesNo();
+  if (yes) {
+    runOTA(r);
+  }
+}
+
+// ---- 画面切替 ----------------------------------------------------------
+
+void checkScreenSwitchButton() {
+  if (M5.BtnB.wasClicked()) {
+    currentScreen = (currentScreen + 1) % 2;
+    drawCurrentScreen();
+    lastTractorX = -TRACTOR_W;
+  }
+}
+
+void drawCurrentScreen() {
+  M5.Display.fillScreen(BLACK);
+  if (currentScreen == 0) {
+    drawHeader();
+    drawStatus();
+  } else {
+    drawDeviceInfoScreen();
+  }
+  drawButtonLabels();
+}
+
+void drawDeviceInfoScreen() {
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("DEVICE INFO");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 24);
+
+  M5.Display.println("[NTRIP] (hardcoded)");
+  M5.Display.printf("  host : %s:%d\n", host, httpPort);
+  M5.Display.printf("  mnt  : %s\n",    mntpnt);
+  M5.Display.printf("  user : %s\n",    strlen(user) ? user : "(anon)");
+
+  M5.Display.println("[Network]");
+  M5.Display.printf("  IP   : %s\n", WiFi.localIP().toString().c_str());
+  M5.Display.printf("  MAC  : %s\n", WiFi.macAddress().c_str());
+
+  uint64_t chipId = ESP.getEfuseMac();
+  M5.Display.println("[Device]");
+  M5.Display.printf("  chip : %04X%08X\n",
+                    (uint16_t)(chipId >> 32), (uint32_t)chipId);
+  M5.Display.printf("  fw   : %s\n", FIRMWARE_VERSION);
+  M5.Display.printf("  app  : %s\n", APP_NAME);
+
+  M5.Display.println("[UART]");
+  M5.Display.printf("  PORT.A  RX=%d TX=%d  %d bps\n",
+                    PORTA_RX_PIN, PORTA_TX_PIN, UART_BPS);
+}
+
+void drawButtonLabels() {
+  int w = M5.Display.width();
+  int third = w / 3;
+  int yLabel = 212;
+
+  M5.Display.fillRect(0, yLabel - 2, w, 18, BLACK);
+  M5.Display.setTextSize(2);
+
+  const char* lblB = "Display";
+  int lblBW = strlen(lblB) * 12;
+  int xB = third + (third - lblBW) / 2;
+  M5.Display.setTextColor(CYAN, BLACK);
+  M5.Display.setCursor(xB, yLabel);
+  M5.Display.print(lblB);
+
+  const char* lblC = "Update";
+  int lblCW = strlen(lblC) * 12;
+  int xC = (third * 2) + (third - lblCW) / 2;
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(xC, yLabel);
+  M5.Display.print(lblC);
 }

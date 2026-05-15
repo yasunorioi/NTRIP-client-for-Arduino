@@ -152,13 +152,24 @@ Client 系 (`M5AtomNTRIPClient` / `M5StackNTRIPClient`) は最小リファレン
 
 ### リリース情報チェック (M5Stack のみ)
 
-`M5StackNTRIPClient` / `M5StackNTRIPBridge` は **BtnC 短押し** で GitHub の最新 release を確認できる:
+`M5StackNTRIPClient` / `M5StackNTRIPBridge` の LCD 最下部にはボタンラベル `[ ] [Display] [Update]` が常時表示される。各ボタンの挙動:
 
-1. BtnC を tap → LCD が `RELEASE INFO` 画面に切替
-2. `https://api.github.com/repos/yasunorioi/NTRIP-client-for-Arduino/releases/latest` を叩いて、現在埋め込まれた `FIRMWARE_VERSION` (build_flag) と比較
-3. 結果を 5 秒間表示 (`Up to date` / `Update available`) → 自動 or 任意ボタンで通常画面復帰
+| ボタン | 短押し (tap) | 長押し (hold 2s) |
+|--------|--------------|------------------|
+| BtnA   | ―            | 起動時のみ: WiFi 設定ポータル |
+| BtnB   | 画面切替 (Status ⇔ Device Info) | 設定ポータル (Bridge のみ) |
+| BtnC   | リリース情報チェック → OTA フロー | ― |
 
-`FIRMWARE_VERSION` は CI で git タグ (`vX.Y.Z`) が埋め込まれる。手元 PIO ビルドはデフォルトで `dev`。OTA 本体 (HTTPUpdate でファーム更新) は未実装。
+**BtnC 短押しの OTA フロー** (`M5StackNTRIP{Client,Bridge}` 共通):
+
+1. `https://api.github.com/repos/yasunorioi/NTRIP-client-for-Arduino/releases/latest` を取得して `FIRMWARE_VERSION` (build_flag) と比較
+2. 同じバージョンなら 「Up to date」 を 5 秒表示して dismiss
+3. 新しいバージョンがあれば、リリースノート (body) を最大 13 行表示 + `Update? A=No  C=Yes` プロンプト
+4. **C 押下** で `https://github.com/.../releases/download/<tag>/<App>-<tag>.bin` から HTTPUpdate でダウンロード → 進捗バー表示 → 成功で自動再起動 (失敗時はエラー表示してメインに戻る)
+
+`FIRMWARE_VERSION` は CI で git タグ (`vX.Y.Z`) が埋め込まれる。手元 PIO ビルドはデフォルトで `dev`。
+
+**BtnB 短押しの画面切替**: Status (現状の RTCM/NMEA レート + トラクター) ⇔ Device Info (NTRIP target / IP / MAC / Chip ID / FW / pinout 一覧) をトグル。サポート/デバッグ時に便利。
 
 ## Releases (CI)
 

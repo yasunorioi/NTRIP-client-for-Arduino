@@ -20,6 +20,7 @@ struct GitHubReleaseInfo {
   String name;                      // リリースタイトル (タグ自体と同じことが多い)
   String publishedAt;               // ISO8601 (例: "2026-05-15T12:34:56Z")
   String htmlUrl;                   // ブラウザ閲覧URL
+  String body;                      // release notes (\n改行に正規化済み)
   String error;                     // ok == false のとき原因メモ
 };
 

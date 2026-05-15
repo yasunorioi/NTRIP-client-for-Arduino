@@ -19,6 +19,8 @@
  */
 #include <M5Unified.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPUpdate.h>
 #include <WiFiManager.h>
 #include "NTRIPClient.h"
 #include "NTRIPConfig.h"
@@ -30,8 +32,9 @@
 #define FIRMWARE_VERSION "dev"
 #endif
 
-// リリース情報を取りに行く GitHub リポジトリ
-constexpr const char* GH_REPO = "yasunorioi/NTRIP-client-for-Arduino";
+// リリース情報を取りに行く GitHub リポジトリと OTA ダウンロードに使う app 名
+constexpr const char* GH_REPO  = "yasunorioi/NTRIP-client-for-Arduino";
+constexpr const char* APP_NAME = "M5StackNTRIPBridge";
 
 // ---- NTRIP 設定 ----
 // 値は NVS から起動時にロード。空ならポータルを強制起動。
@@ -80,11 +83,19 @@ float         lastRtcmBps          = 0.0f;
 float         lastNmeaBps          = 0.0f;
 
 // ---- トラクターアニメーション ----
-// RTCM3 受信量に比例して画面最下部をトラクターが左→右に進む。
+// RTCM3 受信量に比例して画面下部をトラクターが左→右に進む。
+// 画面最下部 (y=212-228) はボタンラベルのために空けたので、トラクターは
+// その上 (y=190-208 程度) に。データが止まれば自然に静止する。
 constexpr int TRACTOR_W            = 24;
 constexpr int TRACTOR_H            = 16;
-constexpr int TRACTOR_Y            = 220;
+constexpr int TRACTOR_Y            = 190;
 constexpr uint64_t BYTES_PER_PIXEL = 200;  // 200 B/px → 1KB/s で 5 px/秒
+
+// ---- 画面切替 ----
+// 0 = 通常ステータス画面 (RTCM/NMEA レート + トラクター)
+// 1 = デバイス情報画面 (NTRIP 設定値、IP、MAC、Chip ID、FW、partition)
+// BtnB 短押しでトグル。BtnC OTA 中は別の overlay 表示で一時的に上書きする。
+volatile int currentScreen = 0;
 
 int           lastTractorX    = -TRACTOR_W;
 unsigned long lastTractorTick = 0;
@@ -105,6 +116,10 @@ void drawPortalScreen();
 void checkPortalButton();
 void checkReleaseButton();
 void showReleaseInfo();
+void checkScreenSwitchButton();
+void drawCurrentScreen();
+void drawDeviceInfoScreen();
+void drawButtonLabels();
 
 void setup() {
   auto cfg = M5.config();
@@ -147,17 +162,16 @@ void setup() {
   backoffMs          = 0;
   state              = AppState::Connecting;
 
-  M5.Display.fillScreen(BLACK);
-  drawHeader();
-  drawStatus();
+  drawCurrentScreen();
   lastReportTime = millis();
 }
 
 void loop() {
   M5.update();
 
-  // BtnB 長押しで設定ポータル、BtnC 短押しでリリース情報
+  // BtnB 長押し=設定ポータル / BtnB 短押し=画面切替 / BtnC 短押し=Update
   checkPortalButton();
+  checkScreenSwitchButton();
   checkReleaseButton();
 
   // 受信機からの NMEA は NTRIP 状態に関係なく常に RS232F 側へ流す
@@ -339,6 +353,7 @@ void setupWiFi() {
 }
 
 void drawHeader() {
+  if (currentScreen != 0) return;
   M5.Display.setCursor(0, 0);
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(WHITE, BLACK);
@@ -351,6 +366,7 @@ void drawHeader() {
 }
 
 void drawStatus() {
+  if (currentScreen != 0) return;
   M5.Display.setTextSize(3);
   M5.Display.setCursor(0, 30);
   M5.Display.setTextColor(stateColor(state), BLACK);
@@ -415,6 +431,7 @@ void drawTractor(int x, int y) {
 }
 
 void updateTractor(uint64_t totalBytes) {
+  if (currentScreen != 0) return;
   unsigned long now = millis();
   if (now - lastTractorTick < 50) return;
   lastTractorTick = now;
@@ -491,9 +508,7 @@ void checkPortalButton() {
       while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
         delay(200);
       }
-      M5.Display.fillScreen(BLACK);
-      drawHeader();
-      drawStatus();
+      drawCurrentScreen();
       pressedAt = 0;
     }
   } else {
@@ -524,26 +539,127 @@ void drawPortalScreen() {
   M5.Display.qrcode(wifiQr.c_str(), 170, 80, 140, 6);
 }
 
-// BtnC 短押しでリリース情報を取得→表示
+// BtnC 短押しでリリース情報→必要なら OTA フロー
 void checkReleaseButton() {
   if (M5.BtnC.wasClicked()) {
-    showReleaseInfo();
-    // 通常表示に戻す。トラクター位置はリセットして次のデータで再描画。
-    M5.Display.fillScreen(BLACK);
-    drawHeader();
-    drawStatus();
+    showReleaseInfo();  // OTA成功時はここで再起動して戻ってこない
+    drawCurrentScreen();
     lastTractorX = -TRACTOR_W;
   }
 }
 
-// 5 秒間 (or 任意ボタン押下) リリース情報を表示
-void showReleaseInfo() {
+// ms ミリ秒経過 or 任意ボタンクリックで戻る
+static void waitForDismiss(uint32_t ms) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    M5.update();
+    if (M5.BtnA.wasClicked() || M5.BtnB.wasClicked() || M5.BtnC.wasClicked()) break;
+    delay(20);
+  }
+}
+
+// BtnA で No、BtnC で Yes を返す
+static bool waitForYesNo() {
+  while (true) {
+    M5.update();
+    if (M5.BtnA.wasClicked()) return false;
+    if (M5.BtnC.wasClicked()) return true;
+    delay(20);
+  }
+}
+
+// 「RELEASE INFO」ヘッダだけ描く共通部
+static void drawReleaseHeader() {
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(YELLOW, BLACK);
   M5.Display.setCursor(0, 0);
   M5.Display.println("RELEASE INFO");
+}
 
+// HTTPUpdate のダウンロード進捗を画面下部にバー描画
+static void otaProgressCb(int cur, int total) {
+  static int lastPct = -1;
+  if (total <= 0) return;
+  int pct = (int)((int64_t)cur * 100 / total);
+  if (pct == lastPct) return;
+  lastPct = pct;
+
+  int w = M5.Display.width();
+  int barX = 10, barY = 180, barW = w - 20, barH = 24;
+  M5.Display.drawRect(barX, barY, barW, barH, WHITE);
+  int fillW = (barW - 4) * pct / 100;
+  M5.Display.fillRect(barX + 2, barY + 2, fillW, barH - 4, GREEN);
+
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 145);
+  M5.Display.printf("OTA: %3d%%  %d/%d KB    ",
+                    pct, cur / 1024, total / 1024);
+  Serial.printf("[OTA] %d%% %d/%d\n", pct, cur, total);
+}
+
+// HTTPUpdate.update() を実行する。成功したら自動で再起動するので戻ってこない。
+// 失敗したら画面にエラーを出して戻る。
+static void runOTA(const GitHubReleaseInfo& r) {
+  String url = "https://github.com/" + String(GH_REPO) +
+               "/releases/download/" + r.tagName + "/" +
+               String(APP_NAME) + "-" + r.tagName + ".bin";
+
+  Serial.printf("[OTA] Updating from %s\n", url.c_str());
+
+  drawReleaseHeader();
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 30);
+  M5.Display.printf("Updating to %s\n", r.tagName.c_str());
+  M5.Display.println("Downloading firmware.bin...");
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15);
+
+  httpUpdate.rebootOnUpdate(true);   // 成功時は ESP.restart() を勝手に呼ぶ
+  httpUpdate.setLedPin(-1);
+  httpUpdate.onProgress(otaProgressCb);
+
+  // GitHub Releases は objects.githubusercontent.com にリダイレクトする
+  HTTPUpdateResult ret = httpUpdate.update(client, url, FIRMWARE_VERSION);
+
+  drawReleaseHeader();
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(RED, BLACK);
+  M5.Display.setCursor(0, 70);
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      M5.Display.println("OTA FAILED");
+      M5.Display.setTextSize(1);
+      M5.Display.printf("err %d: %s\n",
+                        httpUpdate.getLastError(),
+                        httpUpdate.getLastErrorString().c_str());
+      Serial.printf("[OTA] FAILED %d: %s\n",
+                    httpUpdate.getLastError(),
+                    httpUpdate.getLastErrorString().c_str());
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      M5.Display.setTextColor(ORANGE, BLACK);
+      M5.Display.println("NO UPDATE");
+      Serial.println("[OTA] No update applied (server says no)");
+      break;
+    case HTTP_UPDATE_OK:
+      // rebootOnUpdate(true) で再起動済みなのでここには来ない
+      M5.Display.setTextColor(GREEN, BLACK);
+      M5.Display.println("OTA OK");
+      break;
+  }
+  waitForDismiss(8000);
+}
+
+// メイン: BtnC 短押しから呼ばれる。GitHub に問い合わせ、状況によって
+// 「Up to date」「エラー」「Update available + リリースノート + Y/N」を分岐。
+// Yes 選択時に runOTA() に進んで成功すれば再起動して戻らない。
+void showReleaseInfo() {
+  drawReleaseHeader();
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setCursor(0, 30);
@@ -553,33 +669,72 @@ void showReleaseInfo() {
 
   GitHubReleaseInfo r = GitHubRelease::fetchLatest(GH_REPO);
 
-  // 「Querying...」行を上書き
-  M5.Display.fillRect(0, 60, M5.Display.width(), 80, BLACK);
-  M5.Display.setCursor(0, 60);
-  if (r.ok) {
+  if (!r.ok) {
+    M5.Display.setTextColor(RED, BLACK);
+    M5.Display.printf("Failed: HTTP %d\n", r.httpCode);
+    M5.Display.printf("(%s)\n", r.error.c_str());
+    waitForDismiss(5000);
+    return;
+  }
+
+  bool sameVersion = (String(FIRMWARE_VERSION) == r.tagName);
+  if (sameVersion) {
+    drawReleaseHeader();
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(WHITE, BLACK);
+    M5.Display.setCursor(0, 30);
+    M5.Display.printf("Current: %s\n", FIRMWARE_VERSION);
     M5.Display.printf("Latest:  %s\n", r.tagName.c_str());
     M5.Display.printf("Date:    %s\n", r.publishedAt.substring(0, 10).c_str());
     M5.Display.println("");
     M5.Display.setTextSize(2);
-    if (String(FIRMWARE_VERSION) == r.tagName) {
-      M5.Display.setTextColor(GREEN, BLACK);
-      M5.Display.println("Up to date");
-    } else {
-      M5.Display.setTextColor(ORANGE, BLACK);
-      M5.Display.println("Update available");
-    }
-  } else {
-    M5.Display.setTextColor(RED, BLACK);
-    M5.Display.printf("Failed: HTTP %d\n", r.httpCode);
-    M5.Display.printf("(%s)\n", r.error.c_str());
+    M5.Display.setTextColor(GREEN, BLACK);
+    M5.Display.println("Up to date");
+    waitForDismiss(5000);
+    return;
   }
 
-  // 5 秒待機 or 任意ボタンで dismiss
-  unsigned long t0 = millis();
-  while (millis() - t0 < 5000) {
-    M5.update();
-    if (M5.BtnA.wasClicked() || M5.BtnB.wasClicked() || M5.BtnC.wasClicked()) break;
-    delay(20);
+  // ---- Update available: notes + Y/N prompt ----
+  drawReleaseHeader();
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 30);
+  M5.Display.printf("Current: %s -> %s\n", FIRMWARE_VERSION, r.tagName.c_str());
+  M5.Display.printf("Date: %s\n", r.publishedAt.substring(0, 10).c_str());
+
+  // 区切り
+  M5.Display.println("--- release notes ---");
+
+  // body は \n 入りなので println 連打。長くなりすぎないように切り詰める。
+  // 表示できる行数: 残り y=70-180 = 110px / 8px ≒ 13 行
+  int linesShown = 0;
+  const int MAX_LINES = 13;
+  String body = r.body;
+  int start = 0;
+  while (linesShown < MAX_LINES && start < (int)body.length()) {
+    int eol = body.indexOf('\n', start);
+    String line = (eol < 0) ? body.substring(start) : body.substring(start, eol);
+    // 1 行 ~52 文字 (size 1, w=320, ~6px/ch)。安全側で 50。
+    if (line.length() > 50) line = line.substring(0, 47) + "...";
+    M5.Display.println(line);
+    linesShown++;
+    if (eol < 0) break;
+    start = eol + 1;
+  }
+  if (start < (int)body.length()) {
+    M5.Display.setTextColor(DARKGREY, BLACK);
+    M5.Display.println("(truncated)");
+  }
+
+  // Y/N プロンプトを最下部に
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(0, 188);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.println("Update? A=No  C=Yes");
+
+  bool yes = waitForYesNo();
+  if (yes) {
+    runOTA(r);
   }
 }
 
@@ -611,4 +766,89 @@ void runConfigPortal() {
 #else
   Serial.println("[Portal] not compiled in (missing ESPAsyncWebServer dep)");
 #endif
+}
+
+
+// ---- 画面切替 ----------------------------------------------------------
+
+// BtnB 短押しで画面トグル (長押しは checkPortalButton が拾う)
+void checkScreenSwitchButton() {
+  if (M5.BtnB.wasClicked()) {
+    currentScreen = (currentScreen + 1) % 2;
+    drawCurrentScreen();
+    lastTractorX = -TRACTOR_W;  // 戻ったときに再描画されるよう
+  }
+}
+
+// 現在の画面を全描画 (fillScreen + 内容 + ボタンラベル)
+void drawCurrentScreen() {
+  M5.Display.fillScreen(BLACK);
+  if (currentScreen == 0) {
+    drawHeader();
+    drawStatus();
+  } else {
+    drawDeviceInfoScreen();
+  }
+  drawButtonLabels();
+}
+
+void drawDeviceInfoScreen() {
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("DEVICE INFO");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 24);
+
+  M5.Display.println("[NTRIP]");
+  M5.Display.printf("  host : %s:%u\n", g_cfg.host.c_str(), g_cfg.port);
+  M5.Display.printf("  mnt  : %s\n",    g_cfg.mountpoint.c_str());
+  M5.Display.printf("  user : %s\n",    g_cfg.user.length() ? g_cfg.user.c_str() : "(anon)");
+  M5.Display.printf("  vrs  : %s (gga %us)\n",
+                    g_cfg.vrsEnabled ? "ON" : "off",
+                    (unsigned)g_cfg.ggaIntervalSec);
+
+  M5.Display.println("[Network]");
+  M5.Display.printf("  IP   : %s\n", WiFi.localIP().toString().c_str());
+  M5.Display.printf("  MAC  : %s\n", WiFi.macAddress().c_str());
+
+  uint64_t chipId = ESP.getEfuseMac();
+  M5.Display.println("[Device]");
+  M5.Display.printf("  chip : %04X%08X\n",
+                    (uint16_t)(chipId >> 32), (uint32_t)chipId);
+  M5.Display.printf("  fw   : %s\n", FIRMWARE_VERSION);
+  M5.Display.printf("  app  : %s\n", APP_NAME);
+
+  M5.Display.println("[UART]");
+  M5.Display.printf("  PORT.A  RX=%d TX=%d  (RTK rx)\n", PORTA_RX_PIN, PORTA_TX_PIN);
+  M5.Display.printf("  RS232F  RX=%d TX=%d  (NMEA out)\n", RS232F_RX_PIN, RS232F_TX_PIN);
+}
+
+// 画面下部 (y=212-228) にボタン A/B/C のラベル。BtnA は空白固定。
+void drawButtonLabels() {
+  int w = M5.Display.width();
+  int third = w / 3;
+  int yLabel = 212;
+
+  M5.Display.fillRect(0, yLabel - 2, w, 18, BLACK);
+
+  M5.Display.setTextSize(2);
+
+  // BtnB 中央: "Display"
+  const char* lblB = "Display";
+  int lblBW = strlen(lblB) * 12;        // 12px/char (size 2)
+  int xB    = third + (third - lblBW) / 2;
+  M5.Display.setTextColor(CYAN, BLACK);
+  M5.Display.setCursor(xB, yLabel);
+  M5.Display.print(lblB);
+
+  // BtnC 右: "Update"
+  const char* lblC = "Update";
+  int lblCW = strlen(lblC) * 12;
+  int xC    = (third * 2) + (third - lblCW) / 2;
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(xC, yLabel);
+  M5.Display.print(lblC);
 }
