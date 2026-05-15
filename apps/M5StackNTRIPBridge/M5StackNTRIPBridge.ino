@@ -94,8 +94,11 @@ constexpr uint64_t BYTES_PER_PIXEL = 200;  // 200 B/px → 1KB/s で 5 px/秒
 // ---- 画面切替 ----
 // 0 = 通常ステータス画面 (RTCM/NMEA レート + トラクター)
 // 1 = デバイス情報画面 (NTRIP 設定値、IP、MAC、Chip ID、FW、partition)
-// BtnB 短押しでトグル。BtnC OTA 中は別の overlay 表示で一時的に上書きする。
+// 2 = 消灯モード (夜間作業時の眩しさ対策)
+// BtnB 短押しで 0→1→2→0 とサイクル。
+// 消灯中は BtnC 押下も OTA を起こさず画面復帰のみ (誤押下保険)。
 volatile int currentScreen = 0;
+constexpr uint8_t BRIGHTNESS_DEFAULT = 128;  // 0-255 (M5Stack Basic LCD)
 
 int           lastTractorX    = -TRACTOR_W;
 unsigned long lastTractorTick = 0;
@@ -289,6 +292,7 @@ void pumpNmeaToRs232f() {
 // を出してスマホからすぐ参加できるようにする。
 // 引数の ssid は WiFiManager に渡したものをここに同期させる。
 void drawWifiManagerQr(const char* ssid) {
+  M5.Display.setBrightness(BRIGHTNESS_DEFAULT);  // 消灯中でも復帰
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(YELLOW, BLACK);
@@ -518,6 +522,7 @@ void checkPortalButton() {
 
 // ポータル中の LCD: AP情報 + WiFi-join QR + URL
 void drawPortalScreen() {
+  M5.Display.setBrightness(BRIGHTNESS_DEFAULT);  // 消灯中でも復帰
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(YELLOW, BLACK);
@@ -540,8 +545,14 @@ void drawPortalScreen() {
 }
 
 // BtnC 短押しでリリース情報→必要なら OTA フロー
+// 消灯モード中は OTA を起動せず画面復帰のみ (誤押下保険)
 void checkReleaseButton() {
   if (M5.BtnC.wasClicked()) {
+    if (currentScreen == 2) {
+      currentScreen = 0;
+      drawCurrentScreen();
+      return;
+    }
     showReleaseInfo();  // OTA成功時はここで再起動して戻ってこない
     drawCurrentScreen();
     lastTractorX = -TRACTOR_W;
@@ -570,6 +581,7 @@ static bool waitForYesNo() {
 
 // 「RELEASE INFO」ヘッダだけ描く共通部
 static void drawReleaseHeader() {
+  M5.Display.setBrightness(BRIGHTNESS_DEFAULT);  // 消灯中でも復帰
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(YELLOW, BLACK);
@@ -771,17 +783,24 @@ void runConfigPortal() {
 
 // ---- 画面切替 ----------------------------------------------------------
 
-// BtnB 短押しで画面トグル (長押しは checkPortalButton が拾う)
+// BtnB 短押しで画面トグル 0→1→2→0 (長押しは checkPortalButton が拾う)
 void checkScreenSwitchButton() {
   if (M5.BtnB.wasClicked()) {
-    currentScreen = (currentScreen + 1) % 2;
+    currentScreen = (currentScreen + 1) % 3;
     drawCurrentScreen();
     lastTractorX = -TRACTOR_W;  // 戻ったときに再描画されるよう
   }
 }
 
 // 現在の画面を全描画 (fillScreen + 内容 + ボタンラベル)
+// 消灯モード(2)では brightness 0 + 黒塗りで完全に暗くする。
 void drawCurrentScreen() {
+  if (currentScreen == 2) {
+    M5.Display.fillScreen(BLACK);
+    M5.Display.setBrightness(0);
+    return;
+  }
+  M5.Display.setBrightness(BRIGHTNESS_DEFAULT);
   M5.Display.fillScreen(BLACK);
   if (currentScreen == 0) {
     drawHeader();

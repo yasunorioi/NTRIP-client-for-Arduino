@@ -157,8 +157,8 @@ Client 系 (`M5AtomNTRIPClient` / `M5StackNTRIPClient`) は最小リファレン
 | ボタン | 短押し (tap) | 長押し (hold 2s) |
 |--------|--------------|------------------|
 | BtnA   | ―            | 起動時のみ: WiFi 設定ポータル |
-| BtnB   | 画面切替 (Status ⇔ Device Info) | 設定ポータル (Bridge のみ) |
-| BtnC   | リリース情報チェック → OTA フロー | ― |
+| BtnB   | 画面切替 Status → Device Info → **Off (消灯)** → Status | 設定ポータル (Bridge のみ) |
+| BtnC   | リリース情報チェック → OTA フロー (消灯中は画面復帰のみ) | ― |
 
 **BtnC 短押しの OTA フロー** (`M5StackNTRIP{Client,Bridge}` 共通):
 
@@ -169,7 +169,7 @@ Client 系 (`M5AtomNTRIPClient` / `M5StackNTRIPClient`) は最小リファレン
 
 `FIRMWARE_VERSION` は CI で git タグ (`vX.Y.Z`) が埋め込まれる。手元 PIO ビルドはデフォルトで `dev`。
 
-**BtnB 短押しの画面切替**: Status (現状の RTCM/NMEA レート + トラクター) ⇔ Device Info (NTRIP target / IP / MAC / Chip ID / FW / pinout 一覧) をトグル。サポート/デバッグ時に便利。
+**BtnB 短押しの画面切替**: Status (RTCM/NMEA レート + トラクター) → Device Info (NTRIP target / IP / MAC / Chip ID / FW / pinout 一覧) → Off (消灯; 夜間作業時の眩しさ対策、`setBrightness(0)`) と 3-way サイクル。Off 中に BtnC を誤押下しても OTA は起動せず画面復帰のみ。Off 中でも長押しの設定ポータル等は正常に動作 (画面が自動で復帰する)。
 
 ## Releases (CI)
 

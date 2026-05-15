@@ -79,8 +79,11 @@ constexpr int TRACTOR_H           = 16;
 constexpr int TRACTOR_Y           = 190;
 constexpr uint64_t BYTES_PER_PIXEL = 200;  // 200 B/px → 1KB/s で 5 px/秒
 
-// ---- 画面切替 (0 = ステータス, 1 = デバイス情報) ----
+// ---- 画面切替 ----
+// 0 = ステータス, 1 = デバイス情報, 2 = 消灯 (夜間作業時)
+// BtnB 短押しで 0→1→2→0 とサイクル。消灯中は BtnC も画面復帰のみ。
 volatile int currentScreen = 0;
+constexpr uint8_t BRIGHTNESS_DEFAULT = 128;  // 0-255
 
 int           lastTractorX     = -TRACTOR_W;
 unsigned long lastTractorTick  = 0;
@@ -222,6 +225,7 @@ void loop() {
 // WiFiManager のポータル AP が立った瞬間に呼ばれる。LCD に WiFi-join QR
 // を出してスマホからすぐ参加できるようにする。
 void drawWifiManagerQr(const char* ssid) {
+  M5.Display.setBrightness(BRIGHTNESS_DEFAULT);  // 消灯中でも復帰
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(YELLOW, BLACK);
@@ -421,8 +425,14 @@ void handleWifiDown() {
 }
 
 // BtnC 短押しでリリース情報→必要なら OTA フロー
+// 消灯モード中は OTA を起動せず画面復帰のみ
 void checkReleaseButton() {
   if (M5.BtnC.wasClicked()) {
+    if (currentScreen == 2) {
+      currentScreen = 0;
+      drawCurrentScreen();
+      return;
+    }
     showReleaseInfo();  // OTA成功時はここで再起動して戻ってこない
     drawCurrentScreen();
     lastTractorX = -TRACTOR_W;
@@ -449,6 +459,7 @@ static bool waitForYesNo() {
 }
 
 static void drawReleaseHeader() {
+  M5.Display.setBrightness(BRIGHTNESS_DEFAULT);  // 消灯中でも復帰
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(YELLOW, BLACK);
@@ -605,13 +616,20 @@ void showReleaseInfo() {
 
 void checkScreenSwitchButton() {
   if (M5.BtnB.wasClicked()) {
-    currentScreen = (currentScreen + 1) % 2;
+    currentScreen = (currentScreen + 1) % 3;
     drawCurrentScreen();
     lastTractorX = -TRACTOR_W;
   }
 }
 
+// 消灯モード(2)では brightness 0 + 黒塗りで完全に暗くする
 void drawCurrentScreen() {
+  if (currentScreen == 2) {
+    M5.Display.fillScreen(BLACK);
+    M5.Display.setBrightness(0);
+    return;
+  }
+  M5.Display.setBrightness(BRIGHTNESS_DEFAULT);
   M5.Display.fillScreen(BLACK);
   if (currentScreen == 0) {
     drawHeader();
