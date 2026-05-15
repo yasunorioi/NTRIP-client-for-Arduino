@@ -23,6 +23,15 @@
 #include "NTRIPClient.h"
 #include "NTRIPConfig.h"
 #include "NTRIPConfigPortal.h"
+#include "GitHubRelease.h"
+
+// CI が -DFIRMWARE_VERSION='"vX.Y.Z"' で上書きする。デフォルトは "dev"。
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "dev"
+#endif
+
+// リリース情報を取りに行く GitHub リポジトリ
+constexpr const char* GH_REPO = "yasunorioi/NTRIP-client-for-Arduino";
 
 // ---- NTRIP 設定 ----
 // 値は NVS から起動時にロード。空ならポータルを強制起動。
@@ -94,6 +103,8 @@ uint16_t stateColor(AppState s);
 void runConfigPortal();
 void drawPortalScreen();
 void checkPortalButton();
+void checkReleaseButton();
+void showReleaseInfo();
 
 void setup() {
   auto cfg = M5.config();
@@ -145,8 +156,9 @@ void setup() {
 void loop() {
   M5.update();
 
-  // BtnB 長押しで設定ポータルへ
+  // BtnB 長押しで設定ポータル、BtnC 短押しでリリース情報
   checkPortalButton();
+  checkReleaseButton();
 
   // 受信機からの NMEA は NTRIP 状態に関係なく常に RS232F 側へ流す
   pumpNmeaToRs232f();
@@ -510,6 +522,65 @@ void drawPortalScreen() {
   String wifiQr = "WIFI:T:WPA;S:" + g_portalSsid + ";P:" + String(PORTAL_PASSWORD) + ";;";
   // 画面右側に配置: 140x140 程度
   M5.Display.qrcode(wifiQr.c_str(), 170, 80, 140, 6);
+}
+
+// BtnC 短押しでリリース情報を取得→表示
+void checkReleaseButton() {
+  if (M5.BtnC.wasClicked()) {
+    showReleaseInfo();
+    // 通常表示に戻す。トラクター位置はリセットして次のデータで再描画。
+    M5.Display.fillScreen(BLACK);
+    drawHeader();
+    drawStatus();
+    lastTractorX = -TRACTOR_W;
+  }
+}
+
+// 5 秒間 (or 任意ボタン押下) リリース情報を表示
+void showReleaseInfo() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("RELEASE INFO");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 30);
+  M5.Display.printf("Current: %s\n", FIRMWARE_VERSION);
+  M5.Display.println("");
+  M5.Display.println("Querying GitHub...");
+
+  GitHubReleaseInfo r = GitHubRelease::fetchLatest(GH_REPO);
+
+  // 「Querying...」行を上書き
+  M5.Display.fillRect(0, 60, M5.Display.width(), 80, BLACK);
+  M5.Display.setCursor(0, 60);
+  if (r.ok) {
+    M5.Display.printf("Latest:  %s\n", r.tagName.c_str());
+    M5.Display.printf("Date:    %s\n", r.publishedAt.substring(0, 10).c_str());
+    M5.Display.println("");
+    M5.Display.setTextSize(2);
+    if (String(FIRMWARE_VERSION) == r.tagName) {
+      M5.Display.setTextColor(GREEN, BLACK);
+      M5.Display.println("Up to date");
+    } else {
+      M5.Display.setTextColor(ORANGE, BLACK);
+      M5.Display.println("Update available");
+    }
+  } else {
+    M5.Display.setTextColor(RED, BLACK);
+    M5.Display.printf("Failed: HTTP %d\n", r.httpCode);
+    M5.Display.printf("(%s)\n", r.error.c_str());
+  }
+
+  // 5 秒待機 or 任意ボタンで dismiss
+  unsigned long t0 = millis();
+  while (millis() - t0 < 5000) {
+    M5.update();
+    if (M5.BtnA.wasClicked() || M5.BtnB.wasClicked() || M5.BtnC.wasClicked()) break;
+    delay(20);
+  }
 }
 
 void runConfigPortal() {

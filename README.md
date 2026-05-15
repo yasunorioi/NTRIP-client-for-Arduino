@@ -150,6 +150,34 @@ Bridge 系 (`M5AtomNTRIPBridge` / `M5StackNTRIPBridge`) は NTRIP 接続先 (hos
 
 Client 系 (`M5AtomNTRIPClient` / `M5StackNTRIPClient`) は最小リファレンスとしてハードコード設定のままで、NTRIPConfigPortal は使わない。
 
+### リリース情報チェック (M5Stack のみ)
+
+`M5StackNTRIPClient` / `M5StackNTRIPBridge` は **BtnC 短押し** で GitHub の最新 release を確認できる:
+
+1. BtnC を tap → LCD が `RELEASE INFO` 画面に切替
+2. `https://api.github.com/repos/yasunorioi/NTRIP-client-for-Arduino/releases/latest` を叩いて、現在埋め込まれた `FIRMWARE_VERSION` (build_flag) と比較
+3. 結果を 5 秒間表示 (`Up to date` / `Update available`) → 自動 or 任意ボタンで通常画面復帰
+
+`FIRMWARE_VERSION` は CI で git タグ (`vX.Y.Z`) が埋め込まれる。手元 PIO ビルドはデフォルトで `dev`。OTA 本体 (HTTPUpdate でファーム更新) は未実装。
+
+## Releases (CI)
+
+`v*` タグを push すると `.github/workflows/release.yml` が走り、4 アプリ (`M5{Atom,Stack}NTRIP{Client,Bridge}`) を PlatformIO で並列ビルドして、同じタグの GitHub Release に `<App>-<tag>.bin` を添付する。
+
+```bash
+git tag v0.4.0
+git push origin v0.4.0
+```
+
+Stack 系の partition table は `min_spiffs.csv` (app=1.9MB / ota_0=1.9MB) に切替済み。**既存デバイスへの初回書き込み時は flash 全消去が必要**:
+
+```bash
+pio run -t upload --upload-port /dev/cu.usbserial-XXXX
+# もし起動しない (default 1.3MB partition で焼かれていた残骸) 場合:
+esptool.py --port /dev/cu.usbserial-XXXX erase_flash
+pio run -t upload
+```
+
 ## Misc
 
 ### kubota WRH1200A

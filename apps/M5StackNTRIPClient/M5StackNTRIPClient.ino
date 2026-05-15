@@ -21,6 +21,14 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include "NTRIPClient.h"
+#include "GitHubRelease.h"
+
+// CI が -DFIRMWARE_VERSION='"vX.Y.Z"' で上書きする。デフォルトは "dev"。
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "dev"
+#endif
+
+constexpr const char* GH_REPO = "yasunorioi/NTRIP-client-for-Arduino";
 
 // ---- NTRIP サーバ設定 ----
 char* host     = "rtk.toiso.fit";
@@ -80,6 +88,8 @@ void scheduleRetry(bool increase);
 void handleWifiDown();
 const char* stateLabel(AppState s);
 uint16_t stateColor(AppState s);
+void checkReleaseButton();
+void showReleaseInfo();
 
 void setup() {
   auto cfg = M5.config();
@@ -109,6 +119,9 @@ void setup() {
 
 void loop() {
   M5.update();
+
+  // BtnC 短押しでリリース情報
+  checkReleaseButton();
 
   // 1) WiFi 状態チェック
   if (WiFi.status() != WL_CONNECTED) {
@@ -391,5 +404,60 @@ void handleWifiDown() {
   } else {
     Serial.println("WiFi再接続失敗。少し待ってから再試行。");
     delay(5000);
+  }
+}
+
+// BtnC 短押しでリリース情報を取得→表示
+void checkReleaseButton() {
+  if (M5.BtnC.wasClicked()) {
+    showReleaseInfo();
+    M5.Display.fillScreen(BLACK);
+    drawHeader();
+    drawStatus();
+    lastTractorX = -TRACTOR_W;
+  }
+}
+
+void showReleaseInfo() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("RELEASE INFO");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 30);
+  M5.Display.printf("Current: %s\n", FIRMWARE_VERSION);
+  M5.Display.println("");
+  M5.Display.println("Querying GitHub...");
+
+  GitHubReleaseInfo r = GitHubRelease::fetchLatest(GH_REPO);
+
+  M5.Display.fillRect(0, 60, M5.Display.width(), 80, BLACK);
+  M5.Display.setCursor(0, 60);
+  if (r.ok) {
+    M5.Display.printf("Latest:  %s\n", r.tagName.c_str());
+    M5.Display.printf("Date:    %s\n", r.publishedAt.substring(0, 10).c_str());
+    M5.Display.println("");
+    M5.Display.setTextSize(2);
+    if (String(FIRMWARE_VERSION) == r.tagName) {
+      M5.Display.setTextColor(GREEN, BLACK);
+      M5.Display.println("Up to date");
+    } else {
+      M5.Display.setTextColor(ORANGE, BLACK);
+      M5.Display.println("Update available");
+    }
+  } else {
+    M5.Display.setTextColor(RED, BLACK);
+    M5.Display.printf("Failed: HTTP %d\n", r.httpCode);
+    M5.Display.printf("(%s)\n", r.error.c_str());
+  }
+
+  unsigned long t0 = millis();
+  while (millis() - t0 < 5000) {
+    M5.update();
+    if (M5.BtnA.wasClicked() || M5.BtnB.wasClicked() || M5.BtnC.wasClicked()) break;
+    delay(20);
   }
 }

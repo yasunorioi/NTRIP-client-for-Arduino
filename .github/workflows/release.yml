@@ -1,0 +1,83 @@
+name: Build and Release
+
+# v* タグを push したときに 4 つの apps を PlatformIO でビルドし、
+# 同じタグの GitHub Release に firmware.bin を添付する。
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - M5AtomNTRIPClient
+          - M5AtomNTRIPBridge
+          - M5StackNTRIPClient
+          - M5StackNTRIPBridge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ matrix.app }}-${{ hashFiles('apps/**/platformio.ini', 'library.properties') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ matrix.app }}-
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ${{ matrix.app }}
+        env:
+          # platformio.ini 側のデフォルト -DFIRMWARE_VERSION='"dev"' を tag 名で上書き
+          PLATFORMIO_BUILD_FLAGS: '-DFIRMWARE_VERSION=\"${{ github.ref_name }}\"'
+        run: pio run -d apps/${{ matrix.app }}
+
+      - name: Stage firmware.bin
+        run: |
+          mkdir -p _out
+          cp apps/${{ matrix.app }}/.pio/build/*/firmware.bin \
+             _out/${{ matrix.app }}-${{ github.ref_name }}.bin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.app }}
+          path: _out/*.bin
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: _bins
+          pattern: firmware-*
+          merge-multiple: true
+
+      - name: Create / update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 既存タグなら追記、なければ作る
+          files: _bins/*.bin
+          generate_release_notes: true
+          fail_on_unmatched_files: true
