@@ -25,7 +25,7 @@ AsyncWebServer web(80);
 Preferences    prefs;
 
 static const char* MDNS_NAME   = "ntrip-client";
-static const char* FW_VERSION  = "0.5.0";
+static const char* FW_VERSION  = "0.5.1";
 static const char* FW_REPO     = "yasunorioi/NTRIP-client-for-Arduino";
 static const char* FW_BIN_NAME = "m5atom-wifimanager.bin";
 

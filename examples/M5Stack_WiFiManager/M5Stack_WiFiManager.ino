@@ -25,7 +25,7 @@ AsyncWebServer web(80);
 Preferences    prefs;
 
 static const char* MDNS_NAME      = "ntrip-client";
-static const char* FW_VERSION     = "0.5.0";
+static const char* FW_VERSION     = "0.5.1";
 static const char* FW_REPO        = "yasunorioi/NTRIP-client-for-Arduino";
 static const char* FW_BIN_NAME    = "m5stack-wifimanager.bin";
 
@@ -73,6 +73,7 @@ static const TractorPreset TRACTOR_PRESETS[] = {
   { "Claas (RAL 6010)",     0x4C88, 0xFFFF, 0xC000 },
   { "Yanmar (red/black)",   0xC125, 0x2104, 0xC618 },
   { "Iseki (blue)",         0x033F, 0xFFFF, 0xC618 },
+  { "Deutz-Fahr (green)",   0x4DE0, 0x2104, 0xC618 },
 };
 static const int NUM_TRACTOR_PRESETS = sizeof(TRACTOR_PRESETS) / sizeof(TRACTOR_PRESETS[0]);
 int currentTractorIdx = 0;
