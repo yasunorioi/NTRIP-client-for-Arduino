@@ -17,15 +17,17 @@
 #include <Preferences.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <Update.h>
 #include "NTRIPClient.h"
 
 NTRIPClient    ntrip_c;
 AsyncWebServer web(80);
 Preferences    prefs;
 
-static const char* MDNS_NAME  = "ntrip-client";
-static const char* FW_VERSION = "0.4.0";
-static const char* FW_REPO    = "yasunorioi/NTRIP-client-for-Arduino";
+static const char* MDNS_NAME      = "ntrip-client";
+static const char* FW_VERSION     = "0.5.0";
+static const char* FW_REPO        = "yasunorioi/NTRIP-client-for-Arduino";
+static const char* FW_BIN_NAME    = "m5stack-wifimanager.bin";
 
 // ---- NTRIP Server Config (defaults; overridden by NVS) ----
 char host[64]   = "rtk.toiso.fit";
@@ -48,6 +50,12 @@ bool reconnectPending = false;
 String latestVersion;
 String releaseUrl;
 bool   updateAvailable = false;
+
+// ---- OTA state ----
+enum OtaState { OTA_IDLE, OTA_PENDING, OTA_RUNNING, OTA_DONE, OTA_FAILED };
+volatile OtaState otaState = OTA_IDLE;
+int     otaProgress = 0;       // 0..100
+String  otaError;
 
 // ---- Tractor color presets (RGB565) ----
 struct TractorPreset {
@@ -80,7 +88,7 @@ int           tractorX = -TRACTOR_W;
 unsigned long lastTractorTick = 0;
 
 // ---- Display page state ----
-enum DisplayPage { PAGE_MAIN, PAGE_INFO, PAGE_QR };
+enum DisplayPage { PAGE_MAIN, PAGE_INFO, PAGE_QR, PAGE_UPDATE_CONFIRM, PAGE_UPDATING };
 DisplayPage currentPage   = PAGE_INFO;
 bool        displayAsleep = false;
 
@@ -210,6 +218,94 @@ void checkLatestRelease() {
   http.end();
 }
 
+// ---------- OTA ----------
+void runOta() {
+  otaState    = OTA_RUNNING;
+  otaProgress = 0;
+  otaError    = "";
+
+  String url = String("https://github.com/") + FW_REPO +
+               "/releases/download/v" + latestVersion + "/" + FW_BIN_NAME;
+  Serial.printf("OTA: GET %s\n", url.c_str());
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!http.begin(client, url)) {
+    otaError = "http.begin failed";
+    otaState = OTA_FAILED;
+    return;
+  }
+  http.addHeader("User-Agent", "NTRIP-Client-OTA");
+  int code = http.GET();
+  if (code != 200) {
+    otaError = "HTTP " + String(code);
+    otaState = OTA_FAILED;
+    http.end();
+    return;
+  }
+  int total = http.getSize();
+  if (total <= 0) {
+    otaError = "no content-length";
+    otaState = OTA_FAILED;
+    http.end();
+    return;
+  }
+  if (!Update.begin((size_t)total)) {
+    otaError = String("Update.begin: ") + Update.errorString();
+    otaState = OTA_FAILED;
+    http.end();
+    return;
+  }
+  WiFiClient *stream = http.getStreamPtr();
+  uint8_t buf[1024];
+  int written = 0;
+  int lastShown = -1;
+  unsigned long lastYield = millis();
+  while (http.connected() && written < total) {
+    size_t avail = stream->available();
+    if (avail) {
+      size_t toRead = avail > sizeof(buf) ? sizeof(buf) : avail;
+      int r = stream->readBytes(buf, toRead);
+      if (r <= 0) break;
+      if (Update.write(buf, r) != (size_t)r) {
+        otaError = String("write: ") + Update.errorString();
+        Update.abort();
+        otaState = OTA_FAILED;
+        http.end();
+        return;
+      }
+      written += r;
+      otaProgress = (int)((int64_t)written * 100 / total);
+      if (otaProgress != lastShown) {
+        lastShown = otaProgress;
+        refreshUpdatingPage();
+      }
+    } else {
+      delay(1);
+    }
+    if (millis() - lastYield > 50) { yield(); lastYield = millis(); }
+  }
+  http.end();
+  if (written != total) {
+    otaError = "short read";
+    Update.abort();
+    otaState = OTA_FAILED;
+    return;
+  }
+  if (!Update.end(true)) {
+    otaError = String("Update.end: ") + Update.errorString();
+    otaState = OTA_FAILED;
+    return;
+  }
+  Serial.println("OTA: success, restarting");
+  otaState = OTA_DONE;
+  delay(500);
+  ESP.restart();
+}
+
 // ---------- Web UI ----------
 static String htmlEscape(const String &s) {
   String o; o.reserve(s.length());
@@ -248,6 +344,7 @@ static String buildIndexHtml() {
   body += F("<div class='ver'>FW v");
   body += FW_VERSION;
   body += F("<span id='upd'></span></div>");
+  body += F("<div id='ota' style='display:none;margin:.5em 0;padding:.5em;background:#fee;border-left:4px solid #c33;border-radius:3px'></div>");
   body += F("<div class='s'>State: <b id='state'>&mdash;</b><br>"
             "RX bytes: <span id='rx'>&mdash;</span><br>"
             "Uptime: <span id='up'>&mdash;</span> sec</div>");
@@ -275,8 +372,19 @@ static String buildIndexHtml() {
             "document.getElementById('rx').textContent=d.rx.toLocaleString();"
             "document.getElementById('up').textContent=d.uptime;"
             "const u=document.getElementById('upd');"
-            "u.innerHTML=d.latest?` <a class='upd' href='${d.releaseUrl}' target='_blank' rel='noopener'>"
-            "New: v${d.latest} &#8599;</a>`:'';"
+            "if(d.latest){u.innerHTML=` <button type='button' id='ub' style='background:#fc6;color:#400;"
+            "border:none;padding:.2em .6em;border-radius:3px;font-weight:bold;cursor:pointer'>"
+            "Update to v${d.latest}</button>`;"
+            "document.getElementById('ub').onclick=async()=>{"
+            "if(!confirm(`Update firmware to v${d.latest}?`))return;"
+            "await fetch('/update',{method:'POST'});};}else{u.innerHTML='';}"
+            "const o=document.getElementById('ota');"
+            "if(d.ota&&d.ota.state!='idle'){o.style.display='block';"
+            "if(d.ota.state=='running')o.innerHTML=`Updating... ${d.ota.progress}%`;"
+            "else if(d.ota.state=='pending')o.innerHTML='Update pending...';"
+            "else if(d.ota.state=='done')o.innerHTML='Update done. Restarting...';"
+            "else if(d.ota.state=='failed')o.innerHTML=`Update failed: ${d.ota.error||'unknown'}`;"
+            "}else{o.style.display='none';}"
             "}catch(e){}}"
             "function toast(m,err){const t=document.getElementById('t');t.textContent=m;"
             "t.className='toast show'+(err?' err':'');setTimeout(()=>t.className='toast',2500);}"
@@ -291,10 +399,20 @@ static String buildIndexHtml() {
   return body;
 }
 
+static const char* otaStateString() {
+  switch (otaState) {
+    case OTA_PENDING: return "pending";
+    case OTA_RUNNING: return "running";
+    case OTA_DONE:    return "done";
+    case OTA_FAILED:  return "failed";
+    default:          return "idle";
+  }
+}
+
 static String buildStatusJson() {
   bool stalled = (millis() - lastDataTime > STALL_TIMEOUT_MS);
   String j;
-  j.reserve(256);
+  j.reserve(384);
   j  = "{\"fw\":\"";
   j += FW_VERSION;
   j += "\",\"state\":\"";
@@ -310,7 +428,16 @@ static String buildStatusJson() {
     j += releaseUrl;
     j += "\"";
   }
-  j += "}";
+  j += ",\"ota\":{\"state\":\"";
+  j += otaStateString();
+  j += "\",\"progress\":";
+  j += String(otaProgress);
+  if (otaError.length()) {
+    j += ",\"error\":\"";
+    j += otaError;
+    j += "\"";
+  }
+  j += "}}";
   return j;
 }
 
@@ -346,6 +473,18 @@ void setupWeb() {
     saveSettings();
     reconnectPending = true;
     req->send(200, "text/plain", "saved");
+  });
+  web.on("/update", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!updateAvailable) {
+      req->send(409, "text/plain", "no update available");
+      return;
+    }
+    if (otaState != OTA_IDLE && otaState != OTA_FAILED) {
+      req->send(409, "text/plain", "ota in progress");
+      return;
+    }
+    otaState = OTA_PENDING;
+    req->send(202, "text/plain", "ota scheduled");
   });
   web.onNotFound([](AsyncWebServerRequest *req) {
     req->send(404, "text/plain", "not found");
@@ -461,14 +600,80 @@ void drawInfoPage() {
     M5.Display.printf(">> Update: v%s available <<", latestVersion.c_str());
     M5.Display.setTextColor(WHITE, BLACK);
   }
-  // Button labels
+  // Button labels (B becomes "Update" when newer FW available)
   M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
   M5.Display.setTextColor(WHITE, 0x18C3);
   M5.Display.setCursor(8,   226); M5.Display.print("A: Main");
-  M5.Display.setCursor(125, 226); M5.Display.print("B: QR");
+  if (updateAvailable) {
+    M5.Display.setTextColor(YELLOW, 0x18C3);
+    M5.Display.setCursor(110, 226); M5.Display.print("B: Update");
+    M5.Display.setTextColor(WHITE, 0x18C3);
+  } else {
+    M5.Display.setCursor(125, 226); M5.Display.print("B: QR");
+  }
   M5.Display.setCursor(232, 226); M5.Display.print("C: Sleep");
   M5.Display.setTextColor(WHITE, BLACK);
   renderTractor();
+}
+
+void drawUpdateConfirmPage() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(0, 20);
+  M5.Display.println(" Firmware Update");
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 60);
+  M5.Display.printf(" Current: v%s\n", FW_VERSION);
+  M5.Display.printf(" Latest:  v%s\n", latestVersion.c_str());
+  M5.Display.setCursor(0, 100);
+  M5.Display.println(" Download from GitHub and");
+  M5.Display.println(" flash. Device will restart.");
+  M5.Display.setCursor(0, 150);
+  M5.Display.setTextSize(2);
+  M5.Display.println(" Proceed?");
+  // Button labels
+  M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
+  M5.Display.setTextColor(WHITE, 0x18C3);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(20,  226); M5.Display.print("A: NO");
+  M5.Display.setCursor(220, 226); M5.Display.print("C: YES");
+  M5.Display.setTextColor(WHITE, BLACK);
+}
+
+void drawUpdatingPage() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(0, 20);
+  M5.Display.println(" Updating...");
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(0, 60);
+  M5.Display.printf(" Downloading v%s\n", latestVersion.c_str());
+  M5.Display.setCursor(0, 80);
+  M5.Display.printf(" %s\n", FW_BIN_NAME);
+}
+
+void refreshUpdatingPage() {
+  M5.Display.setTextSize(3);
+  M5.Display.setCursor(80, 110);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.printf("%3d%%   ", otaProgress);
+  M5.Display.setTextColor(WHITE, BLACK);
+  // progress bar
+  M5.Display.drawRect(20, 160, 280, 16, WHITE);
+  int w = (280 - 2) * otaProgress / 100;
+  M5.Display.fillRect(21, 161, w, 14, YELLOW);
+  M5.Display.fillRect(21 + w, 161, 280 - 2 - w, 14, BLACK);
+  if (otaState == OTA_FAILED) {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(RED, BLACK);
+    M5.Display.setCursor(0, 200);
+    M5.Display.printf(" FAILED: %s        ", otaError.c_str());
+    M5.Display.setTextColor(WHITE, BLACK);
+  }
 }
 
 void drawQrPage() {
@@ -494,9 +699,11 @@ void drawQrPage() {
 
 void redrawCurrentPage() {
   switch (currentPage) {
-    case PAGE_MAIN: drawMainPage(); break;
-    case PAGE_INFO: drawInfoPage(); break;
-    case PAGE_QR:   drawQrPage();   break;
+    case PAGE_MAIN:           drawMainPage();          break;
+    case PAGE_INFO:           drawInfoPage();          break;
+    case PAGE_QR:             drawQrPage();            break;
+    case PAGE_UPDATE_CONFIRM: drawUpdateConfirmPage(); break;
+    case PAGE_UPDATING:       drawUpdatingPage();      break;
   }
 }
 
@@ -514,23 +721,40 @@ void wakeDisplay() {
 }
 
 void handleButtons() {
+  // No buttons during OTA
+  if (currentPage == PAGE_UPDATING) return;
+
   if (M5.BtnA.wasPressed()) {
-    if (displayAsleep) wakeDisplay();
-    else {
+    if (displayAsleep) { wakeDisplay(); return; }
+    if (currentPage == PAGE_UPDATE_CONFIRM) {  // NO -> back to Info
+      currentPage = PAGE_INFO;
+      redrawCurrentPage();
+    } else {
       currentPage = (currentPage == PAGE_INFO) ? PAGE_MAIN : PAGE_INFO;
       redrawCurrentPage();
     }
   }
   if (M5.BtnB.wasPressed()) {
-    if (displayAsleep) wakeDisplay();
-    else {
+    if (displayAsleep) { wakeDisplay(); return; }
+    if (currentPage == PAGE_INFO && updateAvailable) {
+      currentPage = PAGE_UPDATE_CONFIRM;
+      redrawCurrentPage();
+    } else if (currentPage == PAGE_UPDATE_CONFIRM) {
+      // B is no-op on confirm
+    } else {
       currentPage = (currentPage == PAGE_QR) ? PAGE_MAIN : PAGE_QR;
       redrawCurrentPage();
     }
   }
   if (M5.BtnC.wasPressed()) {
-    if (displayAsleep) wakeDisplay();
-    else                sleepDisplay();
+    if (displayAsleep) { wakeDisplay(); return; }
+    if (currentPage == PAGE_UPDATE_CONFIRM) {  // YES -> start OTA
+      otaState = OTA_PENDING;
+      currentPage = PAGE_UPDATING;
+      redrawCurrentPage();
+    } else {
+      sleepDisplay();
+    }
   }
 }
 
@@ -570,6 +794,18 @@ void setup() {
 void loop() {
   M5.update();
   handleButtons();
+
+  if (otaState == OTA_PENDING) {
+    ntrip_c.stop();
+    if (currentPage != PAGE_UPDATING) {
+      currentPage = PAGE_UPDATING;
+      drawUpdatingPage();
+    }
+    refreshUpdatingPage();
+    runOta();      // blocks; restarts on success
+    refreshUpdatingPage();
+    return;
+  }
 
   if (reconnectPending) {
     reconnectPending = false;
