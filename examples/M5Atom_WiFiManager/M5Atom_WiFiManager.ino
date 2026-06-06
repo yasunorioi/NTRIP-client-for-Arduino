@@ -11,19 +11,20 @@
 #include <M5Unified.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
-#include <WebServer.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include "NTRIPClient.h"
 
-NTRIPClient ntrip_c;
-WebServer   web(80);
-Preferences prefs;
+NTRIPClient    ntrip_c;
+AsyncWebServer web(80);
+Preferences    prefs;
 
 static const char* MDNS_NAME  = "ntrip-client";
-static const char* FW_VERSION = "0.3.0";
+static const char* FW_VERSION = "0.4.0";
 static const char* FW_REPO    = "yasunorioi/NTRIP-client-for-Arduino";
 
 // ---- NTRIP Server Config (defaults; overridden by NVS) ----
@@ -92,7 +93,7 @@ void hsvToRgb(uint8_t h, uint8_t s, uint8_t v, uint8_t &r, uint8_t &g, uint8_t &
 }
 
 void setLed(uint8_t r, uint8_t g, uint8_t b) {
-  M5.dis.drawpix(0, (CRGB){r, g, b});
+  M5.Led.setColor(0, r, g, b);
 }
 
 void setLedRainbow() {
@@ -209,13 +210,16 @@ static String htmlEscape(const String &s) {
   return o;
 }
 
-void handleRoot() {
-  String stateStr =
-    ntripState == NS_OK         ? "connected" :
-    ntripState == NS_CONFIG_ERR ? "config error" : "idle";
+static const char* statusString() {
+  bool stalled = (millis() - lastDataTime > STALL_TIMEOUT_MS);
+  return
+    ntripState == NS_OK         ? (stalled ? "STALLED" : "OK") :
+    ntripState == NS_CONFIG_ERR ? "CFG ERR"                    : "IDLE";
+}
 
+static String buildIndexHtml() {
   String body;
-  body.reserve(2560);
+  body.reserve(3328);
   body += F("<!doctype html><html><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             "<title>NTRIP Client</title>"
@@ -227,17 +231,18 @@ void handleRoot() {
             ".ver{margin:.3em 0 1em;font-size:.9em;color:#555}"
             ".upd{display:inline-block;background:#fc6;color:#400;padding:.15em .6em;"
             "border-radius:3px;text-decoration:none;font-weight:bold;margin-left:.4em}"
+            ".toast{position:fixed;top:1em;right:1em;background:#4a8;color:#fff;"
+            "padding:.5em 1em;border-radius:3px;display:none;font-size:.9em}"
+            ".toast.show{display:block}.toast.err{background:#c33}"
             "</style></head><body>");
   body += F("<h2>NTRIP Client</h2>");
-  body += "<div class='ver'>FW v";
+  body += F("<div class='ver'>FW v");
   body += FW_VERSION;
-  if (updateAvailable) {
-    body += " <a class='upd' href='" + htmlEscape(releaseUrl) + "' target='_blank' rel='noopener'>";
-    body += "New: v" + htmlEscape(latestVersion) + " &#8599;</a>";
-  }
-  body += F("</div>");
-  body += "<div class='s'>State: <b>" + stateStr + "</b><br>RX bytes: " + String((uint32_t)totalBytes) + "</div>";
-  body += F("<form method='POST' action='/save'>");
+  body += F("<span id='upd'></span></div>");
+  body += F("<div class='s'>State: <b id='state'>&mdash;</b><br>"
+            "RX bytes: <span id='rx'>&mdash;</span><br>"
+            "Uptime: <span id='up'>&mdash;</span> sec</div>");
+  body += F("<form id='f' method='POST' action='/save'>");
   body += "<label>Host</label><input name='host' value='" + htmlEscape(host) + "'>";
   body += F("<div class='row'><div>");
   body += "<label>Port</label><input name='port' type='number' value='" + String(httpPort) + "'>";
@@ -246,23 +251,56 @@ void handleRoot() {
   body += F("</div></div>");
   body += "<label>User</label><input name='user' value='" + htmlEscape(user) + "'>";
   body += "<label>Password</label><input name='passwd' type='password' value='" + htmlEscape(passwd) + "'>";
-  body += F("<button type='submit'>Save &amp; Reconnect</button></form></body></html>");
-  web.send(200, "text/html; charset=utf-8", body);
+  body += F("<button id='b' type='submit'>Save &amp; Reconnect</button></form>");
+  body += F("<div id='t' class='toast'></div>");
+  body += F("<script>"
+            "async function poll(){try{const r=await fetch('/status.json');const d=await r.json();"
+            "document.getElementById('state').textContent=d.state;"
+            "document.getElementById('rx').textContent=d.rx.toLocaleString();"
+            "document.getElementById('up').textContent=d.uptime;"
+            "const u=document.getElementById('upd');"
+            "u.innerHTML=d.latest?` <a class='upd' href='${d.releaseUrl}' target='_blank' rel='noopener'>"
+            "New: v${d.latest} &#8599;</a>`:'';"
+            "}catch(e){}}"
+            "function toast(m,err){const t=document.getElementById('t');t.textContent=m;"
+            "t.className='toast show'+(err?' err':'');setTimeout(()=>t.className='toast',2500);}"
+            "document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();"
+            "const b=document.getElementById('b');b.disabled=true;b.textContent='Saving...';"
+            "try{const r=await fetch('/save',{method:'POST',body:new FormData(e.target)});"
+            "if(r.ok)toast('Saved & reconnecting...');else toast('Save failed',true);}"
+            "catch(e){toast('Network error',true);}"
+            "setTimeout(()=>{b.disabled=false;b.textContent='Save & Reconnect';poll();},1500);});"
+            "setInterval(poll,1500);poll();"
+            "</script></body></html>");
+  return body;
 }
 
-void handleSave() {
-  if (web.hasArg("host"))   strlcpy(host,   web.arg("host").c_str(),   sizeof(host));
-  if (web.hasArg("port"))   httpPort = web.arg("port").toInt();
-  if (web.hasArg("mntpnt")) strlcpy(mntpnt, web.arg("mntpnt").c_str(), sizeof(mntpnt));
-  if (web.hasArg("user"))   strlcpy(user,   web.arg("user").c_str(),   sizeof(user));
-  if (web.hasArg("passwd")) strlcpy(passwd, web.arg("passwd").c_str(), sizeof(passwd));
-  if (httpPort <= 0 || httpPort > 65535) httpPort = 2101;
+static String buildStatusJson() {
+  String j;
+  j.reserve(256);
+  j  = "{\"fw\":\"";
+  j += FW_VERSION;
+  j += "\",\"state\":\"";
+  j += statusString();
+  j += "\",\"rx\":";
+  j += String((uint32_t)totalBytes);
+  j += ",\"uptime\":";
+  j += String(millis() / 1000);
+  if (updateAvailable) {
+    j += ",\"latest\":\"";
+    j += latestVersion;
+    j += "\",\"releaseUrl\":\"";
+    j += releaseUrl;
+    j += "\"";
+  }
+  j += "}";
+  return j;
+}
 
-  saveSettings();
-  reconnectPending = true;
-
-  web.sendHeader("Location", "/", true);
-  web.send(303, "text/plain", "Saved");
+static void applyFormParam(AsyncWebServerRequest *req, const char* name, char* dst, size_t dstSize) {
+  if (req->hasParam(name, true)) {
+    strlcpy(dst, req->getParam(name, true)->value().c_str(), dstSize);
+  }
 }
 
 void setupWeb() {
@@ -270,9 +308,26 @@ void setupWeb() {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("mDNS: http://%s.local/\n", MDNS_NAME);
   }
-  web.on("/",     HTTP_GET,  handleRoot);
-  web.on("/save", HTTP_POST, handleSave);
-  web.onNotFound([]() { web.send(404, "text/plain", "not found"); });
+  web.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(200, "text/html; charset=utf-8", buildIndexHtml());
+  });
+  web.on("/status.json", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(200, "application/json", buildStatusJson());
+  });
+  web.on("/save", HTTP_POST, [](AsyncWebServerRequest *req) {
+    applyFormParam(req, "host",   host,   sizeof(host));
+    applyFormParam(req, "mntpnt", mntpnt, sizeof(mntpnt));
+    applyFormParam(req, "user",   user,   sizeof(user));
+    applyFormParam(req, "passwd", passwd, sizeof(passwd));
+    if (req->hasParam("port", true)) httpPort = req->getParam("port", true)->value().toInt();
+    if (httpPort <= 0 || httpPort > 65535) httpPort = 2101;
+    saveSettings();
+    reconnectPending = true;
+    req->send(200, "text/plain", "saved");
+  });
+  web.onNotFound([](AsyncWebServerRequest *req) {
+    req->send(404, "text/plain", "not found");
+  });
   web.begin();
 }
 
@@ -312,7 +367,6 @@ void setup() {
 
 void loop() {
   M5.update();
-  web.handleClient();
 
   if (reconnectPending) {
     reconnectPending = false;
