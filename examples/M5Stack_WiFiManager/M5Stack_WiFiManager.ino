@@ -25,7 +25,7 @@ AsyncWebServer web(80);
 Preferences    prefs;
 
 static const char* MDNS_NAME      = "ntrip-client";
-static const char* FW_VERSION     = "0.5.1";
+static const char* FW_VERSION     = "0.6.0";
 static const char* FW_REPO        = "yasunorioi/NTRIP-client-for-Arduino";
 static const char* FW_BIN_NAME    = "m5stack-wifimanager.bin";
 
@@ -89,9 +89,33 @@ int           tractorX = -TRACTOR_W;
 unsigned long lastTractorTick = 0;
 
 // ---- Display page state ----
-enum DisplayPage { PAGE_MAIN, PAGE_INFO, PAGE_QR, PAGE_UPDATE_CONFIRM, PAGE_UPDATING };
+enum DisplayPage { PAGE_INFO, PAGE_SKY, PAGE_GRAPH, PAGE_QR, PAGE_UPDATE_CONFIRM, PAGE_UPDATING };
 DisplayPage currentPage   = PAGE_INFO;
 bool        displayAsleep = false;
+
+// ---- NMEA / satellite tracking (from Serial2 RX) ----
+struct SatInfo {
+  uint8_t  cons;       // 0=GPS, 1=GLO, 2=GAL, 3=BDS, 4=QZS
+  uint8_t  prn;
+  uint8_t  elev;       // 0..90 deg
+  uint16_t az;         // 0..359 deg
+  uint8_t  snr;        // dBHz (0 = not tracked)
+  unsigned long lastSeen;
+};
+static const int MAX_SATS = 64;
+SatInfo sats[MAX_SATS];
+int     satCount = 0;
+unsigned long lastNmeaTime = 0;
+char    nmeaBuf[128];
+int     nmeaIdx = 0;
+
+// ---- 5-min data rate buckets (1h history = 12 buckets) ----
+static const int           BUCKET_COUNT = 12;
+static const unsigned long BUCKET_MS    = 5UL * 60UL * 1000UL;
+uint32_t      rxBuckets[BUCKET_COUNT] = {0};
+int           bucketHead   = 0;        // index of current (newest) bucket
+unsigned long bucketStartMs = 0;
+uint64_t      bucketStartBytes = 0;
 
 // ---------- NVS ----------
 void loadSettings() {
@@ -217,6 +241,129 @@ void checkLatestRelease() {
     Serial.printf("FW check: HTTP %d\n", code);
   }
   http.end();
+}
+
+// ---------- NMEA parser (GSV only) ----------
+static void addSatObservation(uint8_t cons, uint8_t prn, int elev, int az, int snr) {
+  if (prn == 0) return;
+  unsigned long now = millis();
+  for (int i = 0; i < satCount; i++) {
+    if (sats[i].cons == cons && sats[i].prn == prn) {
+      if (elev >= 0) sats[i].elev = elev;
+      if (az   >= 0) sats[i].az   = az;
+      sats[i].snr      = (snr >= 0) ? snr : 0;
+      sats[i].lastSeen = now;
+      return;
+    }
+  }
+  if (satCount < MAX_SATS) {
+    sats[satCount].cons     = cons;
+    sats[satCount].prn      = prn;
+    sats[satCount].elev     = (elev >= 0) ? elev : 0;
+    sats[satCount].az       = (az   >= 0) ? az   : 0;
+    sats[satCount].snr      = (snr  >= 0) ? snr  : 0;
+    sats[satCount].lastSeen = now;
+    satCount++;
+  }
+}
+
+static void pruneSats() {
+  unsigned long now = millis();
+  int j = 0;
+  for (int i = 0; i < satCount; i++) {
+    if (now - sats[i].lastSeen < 30000UL) {
+      if (i != j) sats[j] = sats[i];
+      j++;
+    }
+  }
+  satCount = j;
+}
+
+// Parse numeric fields (positive ints or -1 for empty) from body until '*' or end.
+static int parseIntFields(const char* body, int* out, int outSize) {
+  int n = 0;
+  const char* p = body;
+  while (n < outSize && *p && *p != '*') {
+    bool has = false;
+    int v = 0;
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); has = true; p++; }
+    out[n++] = has ? v : -1;
+    if (*p == ',') p++;
+    else break;
+  }
+  return n;
+}
+
+static void parseGsvLine(const char* line) {
+  // line starts at '$' and is null-terminated, no \r\n.
+  // We only care about $G*GSV where * is P/L/A/B/Q.
+  uint8_t cons;
+  switch (line[2]) {
+    case 'P': cons = 0; break;
+    case 'L': cons = 1; break;
+    case 'A': cons = 2; break;
+    case 'B': cons = 3; break;
+    case 'Q': cons = 4; break;
+    default:  return;
+  }
+  const char* comma = strchr(line, ',');
+  if (!comma) return;
+  int fields[24];
+  int n = parseIntFields(comma + 1, fields, 24);
+  if (n < 3) return;
+  // fields[0]=total_msgs, [1]=msg_num, [2]=total_sats
+  // up to 4 sats follow: PRN, elev, az, snr  (n field positions 3..18)
+  for (int i = 0; i < 4; i++) {
+    int base = 3 + i * 4;
+    if (base + 3 >= n) break;
+    int prn  = fields[base];
+    int elev = fields[base + 1];
+    int az   = fields[base + 2];
+    int snr  = fields[base + 3];
+    if (prn > 0) addSatObservation(cons, (uint8_t)prn, elev, az, snr);
+  }
+}
+
+static void parseNmeaLine(const char* line) {
+  if (line[0] != '$') return;
+  if (strlen(line) < 6) return;
+  if (line[3] == 'G' && line[4] == 'S' && line[5] == 'V') {
+    parseGsvLine(line);
+    lastNmeaTime = millis();
+  }
+}
+
+static void processNmeaChar(int c) {
+  if (c == '$') {
+    nmeaIdx = 0;
+    nmeaBuf[nmeaIdx++] = '$';
+  } else if (nmeaIdx > 0) {
+    if (c == '\r' || c == '\n') {
+      nmeaBuf[nmeaIdx] = 0;
+      parseNmeaLine(nmeaBuf);
+      nmeaIdx = 0;
+    } else if (nmeaIdx < (int)sizeof(nmeaBuf) - 1) {
+      nmeaBuf[nmeaIdx++] = (char)c;
+    } else {
+      nmeaIdx = 0;
+    }
+  }
+}
+
+// ---------- 5-min bucket update ----------
+static void updateBuckets() {
+  unsigned long now = millis();
+  if (bucketStartMs == 0) {
+    bucketStartMs    = now;
+    bucketStartBytes = totalBytes;
+  }
+  rxBuckets[bucketHead] = (uint32_t)(totalBytes - bucketStartBytes);
+  if (now - bucketStartMs >= BUCKET_MS) {
+    bucketHead = (bucketHead + 1) % BUCKET_COUNT;
+    rxBuckets[bucketHead] = 0;
+    bucketStartMs    = now;
+    bucketStartBytes = totalBytes;
+  }
 }
 
 // ---------- OTA ----------
@@ -534,39 +681,6 @@ static const char* statusString(bool stalled) {
     ntripState == NS_CONFIG_ERR ? "CFG ERR"                     : "IDLE";
 }
 
-void drawHeader() {
-  M5.Display.fillScreen(BLACK);
-  M5.Display.setTextColor(WHITE, BLACK);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 0);
-  M5.Display.printf("ntrip://%s:%d/%s\n", host, httpPort, mntpnt);
-  M5.Display.printf("IP: %s  mDNS: %s.local\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
-  if (updateAvailable) {
-    M5.Display.setTextColor(YELLOW, BLACK);
-    M5.Display.printf("FW: v%s  >> UPDATE: v%s <<\n", FW_VERSION, latestVersion.c_str());
-    M5.Display.setTextColor(WHITE, BLACK);
-  } else {
-    M5.Display.printf("FW: v%s\n", FW_VERSION);
-  }
-  renderTractor();
-}
-
-void drawMainDynamic() {
-  bool stalled = (millis() - lastDataTime > STALL_TIMEOUT_MS);
-  M5.Display.setTextColor(WHITE, BLACK);
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(0, 48);
-  M5.Display.printf("%llu  ", totalBytes);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 90);
-  M5.Display.printf("Status: %s     ", statusString(stalled));
-}
-
-void drawMainPage() {
-  drawHeader();
-  drawMainDynamic();
-}
-
 static const int INFO_DYN_Y = 100;
 
 void refreshInfoDynamic() {
@@ -604,7 +718,7 @@ void drawInfoPage() {
   // Button labels (B becomes "Update" when newer FW available)
   M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
   M5.Display.setTextColor(WHITE, 0x18C3);
-  M5.Display.setCursor(8,   226); M5.Display.print("A: Main");
+  M5.Display.setCursor(8,   226); M5.Display.print("A: Sky");
   if (updateAvailable) {
     M5.Display.setTextColor(YELLOW, 0x18C3);
     M5.Display.setCursor(110, 226); M5.Display.print("B: Update");
@@ -615,6 +729,177 @@ void drawInfoPage() {
   M5.Display.setCursor(232, 226); M5.Display.print("C: Sleep");
   M5.Display.setTextColor(WHITE, BLACK);
   renderTractor();
+}
+
+// Reusable button bar for Sky/Graph/QR (A label varies)
+static void drawNavBar(const char* aLabel, const char* bLabel) {
+  M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
+  M5.Display.setTextColor(WHITE, 0x18C3);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(8,   226); M5.Display.print(aLabel);
+  M5.Display.setCursor(125, 226); M5.Display.print(bLabel);
+  M5.Display.setCursor(232, 226); M5.Display.print("C: Sleep");
+  M5.Display.setTextColor(WHITE, BLACK);
+}
+
+// ---------- Sky page ----------
+static const int SKY_CX = 160;
+static const int SKY_CY = 110;
+static const int SKY_R  = 95;
+
+static uint16_t constellationColor(uint8_t cons) {
+  switch (cons) {
+    case 0: return WHITE;                // GPS
+    case 1: return TFT_RED;              // GLONASS
+    case 2: return TFT_CYAN;             // Galileo
+    case 3: return TFT_YELLOW;           // BeiDou
+    case 4: return TFT_MAGENTA;          // QZSS
+    default: return TFT_LIGHTGREY;
+  }
+}
+
+static const char* constellationLabel(uint8_t cons) {
+  switch (cons) {
+    case 0: return "GPS";
+    case 1: return "GLO";
+    case 2: return "GAL";
+    case 3: return "BDS";
+    case 4: return "QZS";
+    default: return "?";
+  }
+}
+
+static void drawSkyGrid() {
+  M5.Display.drawCircle(SKY_CX, SKY_CY, SKY_R,       TFT_DARKGREY);
+  M5.Display.drawCircle(SKY_CX, SKY_CY, SKY_R * 2/3, TFT_DARKGREY);
+  M5.Display.drawCircle(SKY_CX, SKY_CY, SKY_R / 3,   TFT_DARKGREY);
+  M5.Display.drawLine(SKY_CX - SKY_R, SKY_CY, SKY_CX + SKY_R, SKY_CY, TFT_DARKGREY);
+  M5.Display.drawLine(SKY_CX, SKY_CY - SKY_R, SKY_CX, SKY_CY + SKY_R, TFT_DARKGREY);
+  M5.Display.setTextColor(TFT_DARKGREY, BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(SKY_CX - 3,        SKY_CY - SKY_R - 10); M5.Display.print("N");
+  M5.Display.setCursor(SKY_CX + SKY_R + 3, SKY_CY - 3);          M5.Display.print("E");
+  M5.Display.setCursor(SKY_CX - 3,        SKY_CY + SKY_R + 3);  M5.Display.print("S");
+  M5.Display.setCursor(SKY_CX - SKY_R - 8, SKY_CY - 3);          M5.Display.print("W");
+}
+
+static void plotSats() {
+  int counts[5][2] = {0};   // [cons][0=visible, 1=tracked]
+  int snrSum = 0, snrCount = 0;
+  for (int i = 0; i < satCount; i++) {
+    SatInfo &s = sats[i];
+    if (s.cons < 5) {
+      counts[s.cons][0]++;
+      if (s.snr > 0) counts[s.cons][1]++;
+    }
+    if (s.elev > 90) continue;
+    float r = (90 - s.elev) * SKY_R / 90.0f;
+    float a = (s.az - 90) * M_PI / 180.0f;
+    int x = SKY_CX + (int)(r * cosf(a));
+    int y = SKY_CY + (int)(r * sinf(a));
+    uint16_t col = constellationColor(s.cons);
+    int size = 2 + s.snr / 12;        // SNR-driven dot size
+    if (size > 6) size = 6;
+    if (s.snr > 0) M5.Display.fillCircle(x, y, size, col);
+    else           M5.Display.drawCircle(x, y, 3,    col);
+    if (s.snr > 0) { snrSum += s.snr; snrCount++; }
+    // PRN label
+    M5.Display.setTextColor(col, BLACK);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(x + size + 1, y - 3);
+    M5.Display.print(s.prn);
+  }
+  // Summary line at y=200
+  M5.Display.setTextSize(1);
+  M5.Display.fillRect(0, 200, 320, 16, BLACK);
+  M5.Display.setCursor(0, 202);
+  int xpos = 0;
+  for (int c = 0; c < 5; c++) {
+    if (counts[c][0] == 0) continue;
+    M5.Display.setTextColor(constellationColor(c), BLACK);
+    M5.Display.printf("%s:%d/%d ", constellationLabel(c), counts[c][1], counts[c][0]);
+  }
+  if (snrCount > 0) {
+    M5.Display.setTextColor(WHITE, BLACK);
+    M5.Display.printf(" avg %d", snrSum / snrCount);
+  }
+}
+
+void drawSkyPage() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(0, 0);
+  if (satCount == 0) {
+    M5.Display.println("Sky plot");
+    M5.Display.println();
+    M5.Display.setTextColor(TFT_DARKGREY, BLACK);
+    M5.Display.setCursor(40, SKY_CY);
+    M5.Display.print("(waiting for NMEA on RX2...)");
+    M5.Display.setTextColor(WHITE, BLACK);
+  } else {
+    drawSkyGrid();
+    plotSats();
+  }
+  drawNavBar("A: Graph", updateAvailable ? "B: Update" : "B: QR");
+}
+
+void refreshSkyPage() {
+  M5.Display.fillRect(0, 0, 320, 220, BLACK);
+  if (satCount == 0) {
+    M5.Display.setTextColor(WHITE, BLACK);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(0, 0);
+    M5.Display.println("Sky plot");
+    M5.Display.setTextColor(TFT_DARKGREY, BLACK);
+    M5.Display.setCursor(40, SKY_CY);
+    M5.Display.print("(waiting for NMEA on RX2...)");
+    M5.Display.setTextColor(WHITE, BLACK);
+  } else {
+    drawSkyGrid();
+    plotSats();
+  }
+}
+
+// ---------- Graph page ----------
+void drawGraphPage() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("RX bytes per 5min  (last 1h)");
+
+  // Find max for scaling
+  uint32_t mx = 1;
+  for (int i = 0; i < BUCKET_COUNT; i++) if (rxBuckets[i] > mx) mx = rxBuckets[i];
+
+  const int gx = 30, gy = 30, gw = 280, gh = 160;
+  M5.Display.drawLine(gx, gy, gx, gy + gh, WHITE);
+  M5.Display.drawLine(gx, gy + gh, gx + gw, gy + gh, WHITE);
+
+  int bw = gw / BUCKET_COUNT;
+  // Bars: oldest at left, current at right.
+  for (int i = 0; i < BUCKET_COUNT; i++) {
+    int idx = (bucketHead + 1 + i) % BUCKET_COUNT;  // oldest first
+    int h = (int)((uint64_t)rxBuckets[idx] * gh / mx);
+    int x = gx + 2 + i * bw;
+    bool current = (idx == bucketHead);
+    M5.Display.fillRect(x, gy + gh - h, bw - 2, h, current ? TFT_YELLOW : TFT_GREEN);
+  }
+
+  // Y-axis max label
+  M5.Display.setCursor(0, gy);
+  M5.Display.printf("%lu", (unsigned long)mx);
+  M5.Display.setCursor(0, gy + gh - 8);
+  M5.Display.print("0");
+
+  // X-axis labels
+  M5.Display.setCursor(gx, gy + gh + 4);
+  M5.Display.print("-1h");
+  M5.Display.setCursor(gx + gw - 18, gy + gh + 4);
+  M5.Display.print("now");
+
+  drawNavBar("A: Info", updateAvailable ? "B: Update" : "B: QR");
 }
 
 void drawUpdateConfirmPage() {
@@ -690,18 +975,14 @@ void drawQrPage() {
   M5.Display.setCursor(0, 205);
   M5.Display.print(url);
 
-  M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
-  M5.Display.setTextColor(WHITE, 0x18C3);
-  M5.Display.setCursor(8,   226); M5.Display.print("A: Info");
-  M5.Display.setCursor(125, 226); M5.Display.print("B: Main");
-  M5.Display.setCursor(232, 226); M5.Display.print("C: Sleep");
-  M5.Display.setTextColor(WHITE, BLACK);
+  drawNavBar("A: Info", updateAvailable ? "B: Update" : "B: Info");
 }
 
 void redrawCurrentPage() {
   switch (currentPage) {
-    case PAGE_MAIN:           drawMainPage();          break;
     case PAGE_INFO:           drawInfoPage();          break;
+    case PAGE_SKY:            drawSkyPage();           break;
+    case PAGE_GRAPH:          drawGraphPage();         break;
     case PAGE_QR:             drawQrPage();            break;
     case PAGE_UPDATE_CONFIRM: drawUpdateConfirmPage(); break;
     case PAGE_UPDATING:       drawUpdatingPage();      break;
@@ -727,29 +1008,34 @@ void handleButtons() {
 
   if (M5.BtnA.wasPressed()) {
     if (displayAsleep) { wakeDisplay(); return; }
-    if (currentPage == PAGE_UPDATE_CONFIRM) {  // NO -> back to Info
+    if (currentPage == PAGE_UPDATE_CONFIRM) {     // NO -> back to Info
       currentPage = PAGE_INFO;
-      redrawCurrentPage();
     } else {
-      currentPage = (currentPage == PAGE_INFO) ? PAGE_MAIN : PAGE_INFO;
-      redrawCurrentPage();
+      // Cycle Info -> Sky -> Graph -> Info (skipping QR and special pages)
+      switch (currentPage) {
+        case PAGE_INFO:  currentPage = PAGE_SKY;   break;
+        case PAGE_SKY:   currentPage = PAGE_GRAPH; break;
+        case PAGE_GRAPH: currentPage = PAGE_INFO;  break;
+        default:         currentPage = PAGE_INFO;  break;     // from QR
+      }
     }
+    redrawCurrentPage();
   }
   if (M5.BtnB.wasPressed()) {
     if (displayAsleep) { wakeDisplay(); return; }
-    if (currentPage == PAGE_INFO && updateAvailable) {
+    if (currentPage == PAGE_UPDATE_CONFIRM) {
+      // B is no-op on confirm
+    } else if (updateAvailable) {
       currentPage = PAGE_UPDATE_CONFIRM;
       redrawCurrentPage();
-    } else if (currentPage == PAGE_UPDATE_CONFIRM) {
-      // B is no-op on confirm
     } else {
-      currentPage = (currentPage == PAGE_QR) ? PAGE_MAIN : PAGE_QR;
+      currentPage = (currentPage == PAGE_QR) ? PAGE_INFO : PAGE_QR;
       redrawCurrentPage();
     }
   }
   if (M5.BtnC.wasPressed()) {
     if (displayAsleep) { wakeDisplay(); return; }
-    if (currentPage == PAGE_UPDATE_CONFIRM) {  // YES -> start OTA
+    if (currentPage == PAGE_UPDATE_CONFIRM) {     // YES -> start OTA
       otaState = OTA_PENDING;
       currentPage = PAGE_UPDATING;
       redrawCurrentPage();
@@ -821,6 +1107,11 @@ void loop() {
   }
   Serial2.flush();
 
+  // NMEA from the receiver on Serial2 RX (pin 16)
+  while (Serial2.available()) {
+    processNmeaChar(Serial2.read());
+  }
+
   unsigned long now = millis();
 
   if (totalBytes > lastBytes) {
@@ -837,7 +1128,9 @@ void loop() {
     redrawCurrentPage();
   }
 
-  if ((currentPage == PAGE_MAIN || currentPage == PAGE_INFO) && !displayAsleep
+  updateBuckets();
+
+  if (currentPage == PAGE_INFO && !displayAsleep
       && now - lastTractorTick >= TRACTOR_INTERVAL_MS) {
     lastTractorTick = now;
     bool receiving = (ntripState == NS_OK) && !stalled;
@@ -850,11 +1143,17 @@ void loop() {
 
   static unsigned long lastPrint = 0;
   if (now - lastPrint >= 1000) {
-    Serial.printf("RTCM bytes: %llu  state=%d%s\n",
-                  totalBytes, (int)ntripState, stalled ? " [STALLED]" : "");
+    Serial.printf("RTCM bytes: %llu  state=%d  sats=%d%s\n",
+                  totalBytes, (int)ntripState, satCount,
+                  stalled ? " [STALLED]" : "");
+    pruneSats();
     if (!displayAsleep) {
-      if (currentPage == PAGE_MAIN)      drawMainDynamic();
-      else if (currentPage == PAGE_INFO) refreshInfoDynamic();
+      switch (currentPage) {
+        case PAGE_INFO:  refreshInfoDynamic(); break;
+        case PAGE_SKY:   refreshSkyPage();    break;
+        case PAGE_GRAPH: drawGraphPage();     break;  // full redraw is cheap enough
+        default: break;
+      }
     }
     lastPrint = now;
   }
