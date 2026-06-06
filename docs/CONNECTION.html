@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>NTRIP クライアント接続マニュアル</title>
+<style>
+  @page { size: A4; margin: 12mm 14mm; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.5;
+    color: #222;
+  }
+  h1 {
+    font-size: 16pt;
+    border-bottom: 2px solid #333;
+    padding-bottom: 4px;
+    margin: 0 0 8px 0;
+  }
+  h2 {
+    font-size: 12pt;
+    background: #eee;
+    padding: 3px 8px;
+    margin: 14px 0 6px 0;
+    border-left: 4px solid #555;
+  }
+  ol { padding-left: 20px; margin: 6px 0; }
+  ol li { margin-bottom: 8px; }
+  ul { padding-left: 18px; margin: 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+  th, td { border: 1px solid #888; padding: 4px 8px; text-align: left; font-size: 10pt; }
+  th { background: #f2f2f2; }
+  .led {
+    display: inline-block; width: 14px; height: 14px; border-radius: 50%;
+    vertical-align: middle; border: 1px solid #555; margin-right: 4px;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .red     { background: #e33 !important; }
+  .yellow  { background: #ec3 !important; }
+  .green   { background: #3c3 !important; }
+  .blue    { background: #36c !important; }
+  .magenta { background: #c3c !important; }
+  .rainbow { background: linear-gradient(90deg, #e33, #ec3, #3c3, #36c, #93c) !important; }
+  @media print {
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  }
+  .figures { display: flex; gap: 10px; margin: 6px 0; }
+  .figures figure { margin: 0; flex: 1; text-align: center; }
+  .figures img { max-width: 100%; height: auto; max-height: 70mm; border: 1px solid #999; }
+  .figures figcaption { font-size: 9pt; color: #555; margin-top: 2px; }
+  .note { background: #fff8d6; border-left: 4px solid #d4a017; padding: 6px 10px; margin: 8px 0; font-size: 10pt; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-family: "Menlo", monospace; font-size: 9.5pt; }
+  footer { margin-top: 16px; font-size: 8.5pt; color: #777; border-top: 1px solid #ccc; padding-top: 4px; }
+  .source { display: flex; align-items: center; gap: 12px; margin-top: 14px; border: 1px solid #ccc; padding: 8px 12px; border-radius: 4px; }
+  .source img { width: 24mm; height: 24mm; }
+  .source .url { font-family: "Menlo", monospace; font-size: 9.5pt; word-break: break-all; }
+  .source .label { font-size: 9.5pt; color: #555; }
+  .config-box { display: flex; align-items: center; gap: 12px; margin: 8px 0; border: 1px solid #4a8; background: #f3fbf5; padding: 10px 12px; border-radius: 4px; }
+  .config-box img { width: 28mm; height: 28mm; }
+  .config-box .url { font-family: "Menlo", monospace; font-size: 11pt; font-weight: bold; }
+  .config-box .label { font-size: 9.5pt; color: #555; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+
+<h1>NTRIP クライアント (M5Atom / M5Stack) 接続マニュアル</h1>
+
+<p>RTK 補正データを NTRIP キャスターから受信し、RS232 でレシーバへ流し込む小型機器です。電源を入れて Wi-Fi に接続したあと、ブラウザから NTRIP の接続先を変更できます。</p>
+
+<h2>1. 用意するもの</h2>
+<ul>
+  <li>本体 (M5Atom + ATOMIC RS232 Base、または M5Stack + RS232 モジュール)</li>
+  <li>USB-C ケーブル + 5V 電源 (モバイルバッテリー可)</li>
+  <li>Wi-Fi (2.4GHz)。SSID とパスワードを事前に確認しておくこと</li>
+  <li>スマホまたは PC (初回 Wi-Fi 設定および NTRIP 設定変更時)</li>
+</ul>
+
+<h2>2. 配線</h2>
+<ul>
+  <li>本体 RS232 端子 ↔ GNSS レシーバの RS232 入力 (TX/RX/GND をクロス接続)</li>
+  <li>USB-C に 5V 電源を接続</li>
+</ul>
+
+<h2>3. Wi-Fi 設定 (初回のみ)</h2>
+<ol>
+  <li>本体に電源を入れる。<strong>起動直後 (2秒以内) に本体ボタン (M5Stack は BtnA) を長押し</strong>すると設定モードに入ります (M5Atom は LED が <span class="led blue"></span> 青、M5Stack は LCD に "Config portal active" 表示)。</li>
+  <li>スマホの Wi-Fi 設定画面で <code>NTRIP-Client</code> を選択して接続 (パスワード不要)。</li>
+  <li>自動でブラウザが開きます (開かない場合は <code>http://192.168.4.1</code> を入力)。<strong>Configure WiFi</strong> をタップ。</li>
+  <li>使いたい Wi-Fi の SSID を選び、パスワードを入力して <strong>Save</strong>。</li>
+  <li>本体が自動的に再起動し、入力した Wi-Fi に接続します。成功すると M5Atom は LED が <span class="led green"></span> 緑、M5Stack は LCD に IP アドレスが表示されます。</li>
+</ol>
+
+<div class="figures">
+  <figure>
+    <img src="IMG_1335.png" alt="iPhone Wi-Fi 設定で NTRIP-Client を選択">
+    <figcaption>① スマホ Wi-Fi 設定で "NTRIP-Client" を選択</figcaption>
+  </figure>
+  <figure>
+    <img src="IMG_1334.png" alt="WiFiManager 設定ポータル">
+    <figcaption>② ブラウザに開く設定画面で "Configure WiFi"</figcaption>
+  </figure>
+</div>
+
+<div class="note">
+  入力した Wi-Fi 情報は本体に保存されます。次回以降は電源を入れるだけで自動接続するので、毎回この操作は不要です。
+</div>
+
+<h2>4. NTRIP 接続先の設定 / 変更</h2>
+<p>Wi-Fi に接続できたら、同じ LAN 上のスマホ / PC のブラウザで下記アドレスを開いてください。NTRIP キャスターのホスト・ポート・マウントポイント・ユーザー名・パスワードをその場で変更でき、<strong>保存と同時に新しい設定で再接続</strong>されます。</p>
+
+<div class="config-box">
+  <img src="qr_config.png" alt="設定ページ QR">
+  <div>
+    <div class="label">本体設定ページ:</div>
+    <div class="url">http://ntrip-client.local/</div>
+    <div class="label" style="margin-top:4px">QR を読み込むか、ブラウザに直接入力してください。</div>
+  </div>
+</div>
+
+<ul>
+  <li><strong>Host:</strong> NTRIP キャスターのホスト名 (例: <code>rtk.toiso.fit</code>)</li>
+  <li><strong>Port:</strong> NTRIP ポート番号 (一般的には <code>2101</code>)</li>
+  <li><strong>Mountpoint:</strong> マウントポイント名 (例: <code>eniwa-bd982</code>)</li>
+  <li><strong>User / Password:</strong> 認証が必要なキャスターの場合のみ入力。不要なら空欄で OK</li>
+</ul>
+
+<div class="note">
+  入力した内容は本体の不揮発メモリ (NVS) に保存されるので、電源を切っても保持されます。<code>ntrip-client.local</code> が解決しない端末では、本体起動時にシリアルに表示される IP アドレスを直接ブラウザに入れてもアクセスできます (M5Stack は LCD にも表示)。
+</div>
+
+<h2>5. LED / 表示の見方</h2>
+<table>
+  <tr><th>状態</th><th>M5Atom LED</th><th>M5Stack 表示</th><th>意味 / 対応</th></tr>
+  <tr><td>起動中</td><td><span class="led red"></span> 赤</td><td>"WiFi setup"</td><td>数秒待つ</td></tr>
+  <tr><td>Wi-Fi 接続中</td><td><span class="led yellow"></span> 黄</td><td>"Connecting..."</td><td>1分以上続けば Wi-Fi 設定を見直し</td></tr>
+  <tr><td>Wi-Fi 設定モード</td><td><span class="led blue"></span> 青</td><td>"Config portal active"</td><td>スマホから設定 (上記 3.)</td></tr>
+  <tr><td>RTCM 受信中 (正常)</td><td><span class="led green"></span> 緑</td><td>Status: OK</td><td>—</td></tr>
+  <tr><td>データ停滞 (5秒以上受信なし)</td><td><span class="led rainbow"></span> 虹色</td><td>Status: STALLED!</td><td>自動再接続するのでしばらく待つ</td></tr>
+  <tr><td>NTRIP 設定エラー</td><td><span class="led magenta"></span> マゼンタ</td><td>Status: CFG ERR</td><td>設定ページ (上記 4.) でホスト / マウントポイント等を確認</td></tr>
+</table>
+
+<h2>6. うまくいかない時</h2>
+<ul>
+  <li><strong>緑にならない / Status が OK にならない:</strong> USB を抜き差しして再起動。それでもダメなら Wi-Fi 圏内か、SSID/パスワードを再確認。</li>
+  <li><strong>Wi-Fi 設定をやり直したい:</strong> 起動直後にボタン長押し → 設定モードに入り直す。</li>
+  <li><strong>マゼンタ / CFG ERR が出ている:</strong> <code>http://ntrip-client.local/</code> を開いて NTRIP 接続先を確認 (ホスト・マウントポイント・パスワードのタイプミスが多い)。</li>
+  <li><strong>虹色 / STALLED のまま戻らない:</strong> 自動再接続するのでしばらく待つ。頻発する場合は設置場所の電波状況を確認。</li>
+  <li><strong>レシーバが RTK FIX しない:</strong> RS232 の配線 (TX/RX が逆になっていないか)、GND 接続、ボーレート (115200) を確認。</li>
+</ul>
+
+<div class="source">
+  <img src="qr_github.png" alt="GitHub QR">
+  <div>
+    <div class="label">ソースコード / 最新版:</div>
+    <div class="url">https://github.com/yasunorioi/NTRIP-client-for-Arduino</div>
+  </div>
+</div>
+
+<footer>
+  RS232: 115200 8N1 &nbsp;|&nbsp; 設定保存先: 本体 NVS (Preferences) &nbsp;|&nbsp; mDNS: ntrip-client.local
+</footer>
+
+</body>
+</html>

@@ -1,31 +1,80 @@
 /*
  *  NTRIP client for M5Atom (M5Unified + WiFiManager)
  *  - Connects to NTRIP caster and forwards RTCM data to Serial2
- *  - LED: Green=receiving, Red=disconnected, Rainbow=stalled
+ *  - LED: Green=receiving, Red=disconnected/error, Rainbow=stalled, Magenta=NTRIP config error
  *  - Hold button at boot to enter WiFi config portal
+ *  - After WiFi connect, open http://ntrip-client.local/ to edit NTRIP host/port/mountpoint/user/passwd
+ *    (settings persist in NVS, applied immediately by reconnecting)
+ *  - Firmware update check: on boot, queries GitHub Releases and shows a banner on the web UI
+ *    if a newer version is available
  */
 #include <M5Unified.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include "NTRIPClient.h"
 
 NTRIPClient ntrip_c;
+WebServer   web(80);
+Preferences prefs;
 
-// ---- NTRIP Server Config ----
-char* host     = "rtk.toiso.fit";
-int   httpPort = 2101;
-char* mntpnt   = "eniwa-bd982";
-char* user     = "";
-char* passwd   = "";
+static const char* MDNS_NAME  = "ntrip-client";
+static const char* FW_VERSION = "0.3.0";
+static const char* FW_REPO    = "yasunorioi/NTRIP-client-for-Arduino";
+
+// ---- NTRIP Server Config (defaults; overridden by NVS) ----
+char host[64]   = "rtk.toiso.fit";
+int  httpPort   = 2101;
+char mntpnt[64] = "eniwa-bd982";
+char user[64]   = "";
+char passwd[64] = "";
 
 // ---- State ----
 uint64_t totalBytes = 0;
 uint64_t lastBytes  = 0;
 unsigned long lastDataTime = 0;
-const unsigned long STALL_TIMEOUT_MS = 5000; // 5 sec no data = stalled
+const unsigned long STALL_TIMEOUT_MS = 5000;
 uint8_t rainbowHue = 0;
 
-// HSV to RGB (hue: 0-255, sat/val: 0-255)
+enum NtripState { NS_IDLE, NS_OK, NS_CONFIG_ERR };
+NtripState ntripState = NS_IDLE;
+bool reconnectPending = false;
+
+String latestVersion;
+String releaseUrl;
+bool   updateAvailable = false;
+
+// ---------- NVS ----------
+void loadSettings() {
+  prefs.begin("ntrip", true);
+  String h = prefs.getString("host",   host);
+  int    p = prefs.getInt   ("port",   httpPort);
+  String m = prefs.getString("mntpnt", mntpnt);
+  String u = prefs.getString("user",   user);
+  String w = prefs.getString("passwd", passwd);
+  prefs.end();
+  strlcpy(host,   h.c_str(), sizeof(host));
+  httpPort = p;
+  strlcpy(mntpnt, m.c_str(), sizeof(mntpnt));
+  strlcpy(user,   u.c_str(), sizeof(user));
+  strlcpy(passwd, w.c_str(), sizeof(passwd));
+}
+
+void saveSettings() {
+  prefs.begin("ntrip", false);
+  prefs.putString("host",   host);
+  prefs.putInt   ("port",   httpPort);
+  prefs.putString("mntpnt", mntpnt);
+  prefs.putString("user",   user);
+  prefs.putString("passwd", passwd);
+  prefs.end();
+}
+
+// ---------- LED helpers ----------
 void hsvToRgb(uint8_t h, uint8_t s, uint8_t v, uint8_t &r, uint8_t &g, uint8_t &b) {
   uint8_t region = h / 43;
   uint8_t remainder = (h - region * 43) * 6;
@@ -53,7 +102,7 @@ void setLedRainbow() {
   rainbowHue += 4;
 }
 
-// ---- WiFi Setup ----
+// ---------- WiFi ----------
 void setupWiFi() {
   WiFiManager wm;
 
@@ -70,11 +119,11 @@ void setupWiFi() {
 
   if (doManualConfig) {
     Serial.println("Starting WiFi config portal");
-    setLed(0, 0, 0x40); // Blue = config mode
+    setLed(0, 0, 0x40);
     wm.startConfigPortal("NTRIP-Client");
   } else {
     Serial.println("WiFi connecting...");
-    setLed(0x40, 0x40, 0); // Yellow = connecting
+    setLed(0x40, 0x40, 0);
     wm.autoConnect("NTRIP-Client");
   }
 
@@ -89,38 +138,187 @@ void setupWiFi() {
   }
 }
 
+// ---------- FW update check ----------
+static bool semverNewer(const String &a, const String &b) {
+  int ai[3] = {0,0,0}, bi[3] = {0,0,0};
+  sscanf(a.c_str(), "%d.%d.%d", &ai[0], &ai[1], &ai[2]);
+  sscanf(b.c_str(), "%d.%d.%d", &bi[0], &bi[1], &bi[2]);
+  for (int i = 0; i < 3; i++) {
+    if (ai[i] > bi[i]) return true;
+    if (ai[i] < bi[i]) return false;
+  }
+  return false;
+}
+
+static String extractJsonString(const String &body, const char* key) {
+  String needle = String("\"") + key + "\":\"";
+  int p = body.indexOf(needle);
+  if (p < 0) return "";
+  p += needle.length();
+  int e = body.indexOf('"', p);
+  if (e <= p) return "";
+  return body.substring(p, e);
+}
+
+void checkLatestRelease() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(5000);
+  String url = String("https://api.github.com/repos/") + FW_REPO + "/releases/latest";
+  if (!http.begin(client, url)) {
+    Serial.println("FW check: http.begin failed");
+    return;
+  }
+  http.addHeader("User-Agent", "NTRIP-Client-FW-Check");
+  int code = http.GET();
+  if (code == 200) {
+    String body = http.getString();
+    String tag  = extractJsonString(body, "tag_name");
+    String html = extractJsonString(body, "html_url");
+    if (tag.length() > 0) {
+      String ver = (tag.startsWith("v") || tag.startsWith("V")) ? tag.substring(1) : tag;
+      latestVersion   = ver;
+      releaseUrl      = html;
+      updateAvailable = semverNewer(ver, FW_VERSION);
+      Serial.printf("FW check: latest=%s current=%s update=%d\n",
+                    ver.c_str(), FW_VERSION, updateAvailable ? 1 : 0);
+    } else {
+      Serial.println("FW check: tag_name not found");
+    }
+  } else {
+    Serial.printf("FW check: HTTP %d\n", code);
+  }
+  http.end();
+}
+
+// ---------- Web UI ----------
+static String htmlEscape(const String &s) {
+  String o; o.reserve(s.length());
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '&': o += "&amp;";  break;
+      case '<': o += "&lt;";   break;
+      case '>': o += "&gt;";   break;
+      case '"': o += "&quot;"; break;
+      default:  o += c;
+    }
+  }
+  return o;
+}
+
+void handleRoot() {
+  String stateStr =
+    ntripState == NS_OK         ? "connected" :
+    ntripState == NS_CONFIG_ERR ? "config error" : "idle";
+
+  String body;
+  body.reserve(2560);
+  body += F("<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>NTRIP Client</title>"
+            "<style>body{font-family:sans-serif;max-width:480px;margin:1em auto;padding:0 1em}"
+            "label{display:block;margin:.6em 0 .2em}input{width:100%;padding:.4em;font-size:1em}"
+            ".row{display:flex;gap:.5em}.row>div{flex:1}"
+            "button{margin-top:1em;padding:.6em 1.2em;font-size:1em}"
+            ".s{margin-bottom:1em;padding:.5em;background:#eef;border-radius:4px}"
+            ".ver{margin:.3em 0 1em;font-size:.9em;color:#555}"
+            ".upd{display:inline-block;background:#fc6;color:#400;padding:.15em .6em;"
+            "border-radius:3px;text-decoration:none;font-weight:bold;margin-left:.4em}"
+            "</style></head><body>");
+  body += F("<h2>NTRIP Client</h2>");
+  body += "<div class='ver'>FW v";
+  body += FW_VERSION;
+  if (updateAvailable) {
+    body += " <a class='upd' href='" + htmlEscape(releaseUrl) + "' target='_blank' rel='noopener'>";
+    body += "New: v" + htmlEscape(latestVersion) + " &#8599;</a>";
+  }
+  body += F("</div>");
+  body += "<div class='s'>State: <b>" + stateStr + "</b><br>RX bytes: " + String((uint32_t)totalBytes) + "</div>";
+  body += F("<form method='POST' action='/save'>");
+  body += "<label>Host</label><input name='host' value='" + htmlEscape(host) + "'>";
+  body += F("<div class='row'><div>");
+  body += "<label>Port</label><input name='port' type='number' value='" + String(httpPort) + "'>";
+  body += F("</div><div>");
+  body += "<label>Mountpoint</label><input name='mntpnt' value='" + htmlEscape(mntpnt) + "'>";
+  body += F("</div></div>");
+  body += "<label>User</label><input name='user' value='" + htmlEscape(user) + "'>";
+  body += "<label>Password</label><input name='passwd' type='password' value='" + htmlEscape(passwd) + "'>";
+  body += F("<button type='submit'>Save &amp; Reconnect</button></form></body></html>");
+  web.send(200, "text/html; charset=utf-8", body);
+}
+
+void handleSave() {
+  if (web.hasArg("host"))   strlcpy(host,   web.arg("host").c_str(),   sizeof(host));
+  if (web.hasArg("port"))   httpPort = web.arg("port").toInt();
+  if (web.hasArg("mntpnt")) strlcpy(mntpnt, web.arg("mntpnt").c_str(), sizeof(mntpnt));
+  if (web.hasArg("user"))   strlcpy(user,   web.arg("user").c_str(),   sizeof(user));
+  if (web.hasArg("passwd")) strlcpy(passwd, web.arg("passwd").c_str(), sizeof(passwd));
+  if (httpPort <= 0 || httpPort > 65535) httpPort = 2101;
+
+  saveSettings();
+  reconnectPending = true;
+
+  web.sendHeader("Location", "/", true);
+  web.send(303, "text/plain", "Saved");
+}
+
+void setupWeb() {
+  if (MDNS.begin(MDNS_NAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("mDNS: http://%s.local/\n", MDNS_NAME);
+  }
+  web.on("/",     HTTP_GET,  handleRoot);
+  web.on("/save", HTTP_POST, handleSave);
+  web.onNotFound([]() { web.send(404, "text/plain", "not found"); });
+  web.begin();
+}
+
+// ---------- NTRIP ----------
+bool connectNtrip() {
+  ntrip_c.stop();
+  Serial.printf("Connecting NTRIP: %s:%d/%s\n", host, httpPort, mntpnt);
+  bool ok = ntrip_c.reqRaw(host, httpPort, mntpnt, user, passwd);
+  if (ok) {
+    Serial.println("NTRIP connected!");
+    ntripState  = NS_OK;
+    lastDataTime = millis();
+    lastBytes    = totalBytes;
+    setLed(0, 0x40, 0);
+  } else {
+    Serial.println("NTRIP connection failed");
+    ntripState = NS_CONFIG_ERR;
+    setLed(0x40, 0, 0x40); // magenta = check settings
+  }
+  return ok;
+}
+
 void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
   Serial2.begin(115200, SERIAL_8N1, 22, 19);
 
-  setLed(0x40, 0, 0); // Red = starting
+  setLed(0x40, 0, 0);
+  Serial.printf("NTRIP Client FW v%s\n", FW_VERSION);
+  loadSettings();
   setupWiFi();
-
-  Serial.print("Connecting to NTRIP: ");
-  Serial.print(host);
-  Serial.print(":");
-  Serial.print(httpPort);
-  Serial.print("/");
-  Serial.println(mntpnt);
-
-  if (!ntrip_c.reqRaw(host, httpPort, mntpnt, user, passwd)) {
-    Serial.println("NTRIP connection failed, restarting...");
-    setLed(0x40, 0, 0);
-    delay(15000);
-    ESP.restart();
-  }
-
-  Serial.println("NTRIP connected!");
-  setLed(0, 0x40, 0); // Green = connected
-  lastDataTime = millis();
+  setupWeb();
+  checkLatestRelease();
+  connectNtrip();
 }
 
 void loop() {
   M5.update();
+  web.handleClient();
 
-  // Read RTCM data
+  if (reconnectPending) {
+    reconnectPending = false;
+    connectNtrip();
+  }
+
   while (ntrip_c.available()) {
     char ch = ntrip_c.read();
     Serial2.print(ch);
@@ -129,37 +327,27 @@ void loop() {
 
   unsigned long now = millis();
 
-  // Check for new data
   if (totalBytes > lastBytes) {
     lastBytes = totalBytes;
     lastDataTime = now;
-    setLed(0, 0x40, 0); // Green = receiving
+    if (ntripState == NS_OK) setLed(0, 0x40, 0);
   }
 
-  // Stall detection: no new data for STALL_TIMEOUT_MS
-  if (now - lastDataTime > STALL_TIMEOUT_MS) {
-    setLedRainbow(); // Rainbow = stalled
-    // If stalled too long, try reconnecting
-    if (now - lastDataTime > 30000) {
-      Serial.println("Stalled 30s, restarting...");
-      ntrip_c.stop();
-      delay(1000);
-      ESP.restart();
+  if (ntripState == NS_OK) {
+    if (now - lastDataTime > STALL_TIMEOUT_MS) {
+      setLedRainbow();
+    }
+    if (!ntrip_c.connected()) {
+      Serial.println("NTRIP disconnected, reconnecting...");
+      setLed(0x40, 0, 0);
+      delay(500);
+      connectNtrip();
     }
   }
 
-  // Connection lost
-  if (!ntrip_c.connected()) {
-    Serial.println("NTRIP disconnected, restarting...");
-    setLed(0x40, 0, 0); // Red
-    delay(5000);
-    ESP.restart();
-  }
-
-  // Print stats every second
   static unsigned long lastPrint = 0;
   if (now - lastPrint >= 1000) {
-    Serial.printf("RTCM bytes: %llu\n", totalBytes);
+    Serial.printf("RTCM bytes: %llu  state=%d\n", totalBytes, (int)ntripState);
     lastPrint = now;
   }
 
