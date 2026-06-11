@@ -84,10 +84,11 @@ void setup() {
   M5.Display.println("NTRIP connected!");
   lastDataTime = millis();
 
-  timer = timerBegin(0, getApbFrequency() / 1000000, true);
-  timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, 1000000, true);
-  timerAlarmEnable(timer);
+  // ESP32 Arduino 3.x timer API: timerBegin takes target frequency,
+  // timerAlarm replaces the old write+enable pair.
+  timer = timerBegin(1000000);          // 1 MHz tick (1 us)
+  timerAttachInterrupt(timer, &onTimer);
+  timerAlarm(timer, 1000000, true, 0);  // fire every 1,000,000 ticks = 1 s, autoreload
 }
 
 void loop() {

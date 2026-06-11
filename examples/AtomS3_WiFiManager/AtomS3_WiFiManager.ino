@@ -1,12 +1,15 @@
 /*
- *  NTRIP client for M5Stack (M5Unified + WiFiManager)
- *  - Connects to NTRIP caster and forwards RTCM data to Serial2
- *  - LCD status display with byte counter
- *  - Hold BtnA at boot to enter WiFi config portal
+ *  NTRIP client for M5 AtomS3 + Atom RS232 Base (M5Unified + WiFiManager)
+ *  - Connects to NTRIP caster and forwards RTCM data to Serial2 (TX=G6, RX=G5)
+ *  - 128x128 LCD: Info / Sky / Graph / QR pages
+ *  - Single button (face):
+ *      short press           = cycle pages (Info -> Sky -> Graph -> QR -> Info)
+ *      long press (>=800ms)  = toggle display sleep
+ *      hold at boot          = enter WiFi config portal
  *  - After WiFi connect, open http://ntrip-client.local/ to edit NTRIP host/port/mountpoint/user/passwd
  *    (settings persist in NVS, applied immediately by reconnecting)
- *  - Firmware update check: on boot, queries GitHub Releases. New version is shown in yellow
- *    on the LCD header and as a banner on the web UI
+ *  - Firmware update check: queries GitHub Releases. New version is shown in yellow
+ *    on the LCD and as a banner on the web UI. Trigger OTA from the web UI.
  */
 #include <M5Unified.h>
 #include <WiFi.h>
@@ -24,14 +27,20 @@ NTRIPClient    ntrip_c;
 AsyncWebServer web(80);
 Preferences    prefs;
 
-// Forward declarations (required by PlatformIO's stricter auto-prototyper)
-static const char* statusString(bool stalled);
-void refreshUpdatingPage();
-
 static const char* MDNS_NAME      = "ntrip-client";
 static const char* FW_VERSION     = "0.6.0";
 static const char* FW_REPO        = "yasunorioi/NTRIP-client-for-Arduino";
-static const char* FW_BIN_NAME    = "m5stack-wifimanager.bin";
+static const char* FW_BIN_NAME    = "atoms3-wifimanager.bin";
+
+// Atom RS232 Base on AtomS3 (Atom Base Grove UART)
+static const int RS232_TX_PIN = 6;
+static const int RS232_RX_PIN = 5;
+
+// LCD geometry
+static const int LCD_W = 128;
+static const int LCD_H = 128;
+static const int NAV_Y = 118;   // nav bar top
+static const int NAV_H = 10;
 
 // ---- NTRIP Server Config (defaults; overridden by NVS) ----
 char host[64]   = "rtk.toiso.fit";
@@ -58,7 +67,7 @@ bool   updateAvailable = false;
 // ---- OTA state ----
 enum OtaState { OTA_IDLE, OTA_PENDING, OTA_RUNNING, OTA_DONE, OTA_FAILED };
 volatile OtaState otaState = OTA_IDLE;
-int     otaProgress = 0;       // 0..100
+int     otaProgress = 0;
 String  otaError;
 
 // ---- Tractor color presets (RGB565) ----
@@ -85,8 +94,8 @@ int currentTractorIdx = 0;
 // ---- Tractor animation ----
 static const int TRACTOR_W = 32;
 static const int TRACTOR_H = 26;
-static const int TRACTOR_DISP_Y = 190;
-static const int TRACTOR_SPEED = 4;
+static const int TRACTOR_DISP_Y = 86;
+static const int TRACTOR_SPEED = 3;
 static const unsigned long TRACTOR_INTERVAL_MS = 100;
 M5Canvas tractorCanvas(&M5.Display);
 int           tractorX = -TRACTOR_W;
@@ -97,13 +106,19 @@ enum DisplayPage { PAGE_INFO, PAGE_SKY, PAGE_GRAPH, PAGE_QR, PAGE_UPDATE_CONFIRM
 DisplayPage currentPage   = PAGE_INFO;
 bool        displayAsleep = false;
 
-// ---- NMEA / satellite tracking (from Serial2 RX) ----
+// ---- Button (single face button) ----
+static const unsigned long BTN_LONG_MS = 800;
+bool          btnDown        = false;
+unsigned long btnDownAt      = 0;
+bool          btnLongFired   = false;
+
+// ---- NMEA / satellite tracking ----
 struct SatInfo {
   uint8_t  cons;       // 0=GPS, 1=GLO, 2=GAL, 3=BDS, 4=QZS
   uint8_t  prn;
-  uint8_t  elev;       // 0..90 deg
-  uint16_t az;         // 0..359 deg
-  uint8_t  snr;        // dBHz (0 = not tracked)
+  uint8_t  elev;
+  uint16_t az;
+  uint8_t  snr;
   unsigned long lastSeen;
 };
 static const int MAX_SATS = 64;
@@ -117,9 +132,13 @@ int     nmeaIdx = 0;
 static const int           BUCKET_COUNT = 12;
 static const unsigned long BUCKET_MS    = 5UL * 60UL * 1000UL;
 uint32_t      rxBuckets[BUCKET_COUNT] = {0};
-int           bucketHead   = 0;        // index of current (newest) bucket
+int           bucketHead   = 0;
 unsigned long bucketStartMs = 0;
 uint64_t      bucketStartBytes = 0;
+
+// forward decls
+static const char* statusString(bool stalled);
+void refreshUpdatingPage();
 
 // ---------- NVS ----------
 void loadSettings() {
@@ -155,10 +174,10 @@ void saveSettings() {
 void setupWiFi() {
   WiFiManager wm;
 
-  M5.Display.setTextSize(2);
+  M5.Display.setTextSize(1);
   M5.Display.setCursor(0, 0);
   M5.Display.println("WiFi setup");
-  M5.Display.println("Hold BtnA for config");
+  M5.Display.println("Hold btn for cfg");
 
   bool doManualConfig = false;
   for (int i = 0; i < 200; i++) {
@@ -171,8 +190,9 @@ void setupWiFi() {
   }
 
   if (doManualConfig) {
-    M5.Display.println("Config portal active");
-    M5.Display.println("SSID: NTRIP-Client");
+    M5.Display.println("Portal active");
+    M5.Display.println("SSID:");
+    M5.Display.println(" NTRIP-Client");
     wm.startConfigPortal("NTRIP-Client");
   } else {
     M5.Display.println("Connecting...");
@@ -182,8 +202,8 @@ void setupWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("WiFi connected: ");
     Serial.println(WiFi.localIP());
-    M5.Display.print("IP: ");
-    M5.Display.println(WiFi.localIP());
+    M5.Display.print("IP:");
+    M5.Display.println(WiFi.localIP().toString());
   } else {
     Serial.println("WiFi failed");
     M5.Display.println("WiFi FAILED");
@@ -283,7 +303,6 @@ static void pruneSats() {
   satCount = j;
 }
 
-// Parse numeric fields (positive ints or -1 for empty) from body until '*' or end.
 static int parseIntFields(const char* body, int* out, int outSize) {
   int n = 0;
   const char* p = body;
@@ -299,8 +318,6 @@ static int parseIntFields(const char* body, int* out, int outSize) {
 }
 
 static void parseGsvLine(const char* line) {
-  // line starts at '$' and is null-terminated, no \r\n.
-  // We only care about $G*GSV where * is P/L/A/B/Q.
   uint8_t cons;
   switch (line[2]) {
     case 'P': cons = 0; break;
@@ -315,8 +332,6 @@ static void parseGsvLine(const char* line) {
   int fields[24];
   int n = parseIntFields(comma + 1, fields, 24);
   if (n < 3) return;
-  // fields[0]=total_msgs, [1]=msg_num, [2]=total_sats
-  // up to 4 sats follow: PRN, elev, az, snr  (n field positions 3..18)
   for (int i = 0; i < 4; i++) {
     int base = 3 + i * 4;
     if (base + 3 >= n) break;
@@ -492,7 +507,7 @@ static String buildIndexHtml() {
             "padding:.5em 1em;border-radius:3px;display:none;font-size:.9em}"
             ".toast.show{display:block}.toast.err{background:#c33}"
             "</style></head><body>");
-  body += F("<h2>NTRIP Client</h2>");
+  body += F("<h2>NTRIP Client (AtomS3)</h2>");
   body += F("<div class='ver'>FW v");
   body += FW_VERSION;
   body += F("<span id='upd'></span></div>");
@@ -603,7 +618,8 @@ void setupWeb() {
   if (MDNS.begin(MDNS_NAME)) {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("mDNS: http://%s.local/\n", MDNS_NAME);
-    M5.Display.printf("http://%s.local/\n", MDNS_NAME);
+    M5.Display.printf("http://%s\n", MDNS_NAME);
+    M5.Display.println(".local/");
   }
   web.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
     req->send(200, "text/html; charset=utf-8", buildIndexHtml());
@@ -647,29 +663,23 @@ void setupWeb() {
 // ---------- Tractor sprite ----------
 void initTractor() {
   tractorCanvas.setColorDepth(16);
-  tractorCanvas.createSprite(M5.Display.width(), TRACTOR_H + 4);
+  tractorCanvas.createSprite(LCD_W, TRACTOR_H + 4);
 }
 
 static void drawTractorAt(int sx, int sy) {
-  // Facing right, ~32x26. Big rear wheel on left, small front wheel on right.
   const TractorPreset &p = TRACTOR_PRESETS[currentTractorIdx];
   static const uint16_t BROWN = 0x9261;
-  // Wheels first (body masks upper halves)
-  tractorCanvas.fillCircle(sx +  8, sy + 19, 6, BLACK);          // rear (big)
-  tractorCanvas.fillCircle(sx + 25, sy + 20, 4, BLACK);          // front (small)
-  tractorCanvas.fillCircle(sx +  8, sy + 19, 3, p.hub);          // rear hub
-  tractorCanvas.fillCircle(sx + 25, sy + 20, 2, p.hub);          // front hub
-  tractorCanvas.fillCircle(sx +  8, sy + 19, 1, BLACK);          // rear bolt
-  // Exhaust pipe (rising up from hood)
+  tractorCanvas.fillCircle(sx +  8, sy + 19, 6, BLACK);
+  tractorCanvas.fillCircle(sx + 25, sy + 20, 4, BLACK);
+  tractorCanvas.fillCircle(sx +  8, sy + 19, 3, p.hub);
+  tractorCanvas.fillCircle(sx + 25, sy + 20, 2, p.hub);
+  tractorCanvas.fillCircle(sx +  8, sy + 19, 1, BLACK);
   tractorCanvas.fillRect(sx + 15, sy,      2, 12, BROWN);
-  tractorCanvas.fillRect(sx + 14, sy + 1,  4,  2, BROWN);        // cap flare
-  // Cabin (rear, left)
+  tractorCanvas.fillRect(sx + 14, sy + 1,  4,  2, BROWN);
   tractorCanvas.fillRect(sx +  2, sy + 3, 12,  8, p.body);
-  tractorCanvas.fillRect(sx +  1, sy + 2, 14,  2, p.roof);       // roof
-  tractorCanvas.drawRect(sx +  4, sy + 5,  8,  5, p.roof);       // window
-  // Hood / body (front, right)
+  tractorCanvas.fillRect(sx +  1, sy + 2, 14,  2, p.roof);
+  tractorCanvas.drawRect(sx +  4, sy + 5,  8,  5, p.roof);
   tractorCanvas.fillRect(sx + 15, sy + 11, 15, 7, p.body);
-  // Headlight (very front)
   tractorCanvas.fillRect(sx + 28, sy + 12,  2, 3, YELLOW);
 }
 
@@ -681,21 +691,32 @@ void renderTractor() {
 
 static const char* statusString(bool stalled) {
   return
-    ntripState == NS_OK         ? (stalled ? "STALLED!" : "OK") :
-    ntripState == NS_CONFIG_ERR ? "CFG ERR"                     : "IDLE";
+    ntripState == NS_OK         ? (stalled ? "STALL" : "OK") :
+    ntripState == NS_CONFIG_ERR ? "CFGERR"                   : "IDLE";
 }
 
-static const int INFO_DYN_Y = 100;
+// ---------- Nav bar ----------
+static void drawNavBar(const char* hint) {
+  M5.Display.fillRect(0, NAV_Y, LCD_W, NAV_H, 0x18C3);
+  M5.Display.setTextColor(WHITE, 0x18C3);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(2, NAV_Y + 1);
+  M5.Display.print(hint);
+  M5.Display.setTextColor(WHITE, BLACK);
+}
+
+// ---------- Info page ----------
+static const int INFO_DYN_Y = 40;
 
 void refreshInfoDynamic() {
   bool stalled = (millis() - lastDataTime > STALL_TIMEOUT_MS);
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setTextSize(1);
-  M5.Display.fillRect(0, INFO_DYN_Y, 320, 32, BLACK);
+  M5.Display.fillRect(0, INFO_DYN_Y, LCD_W, 32, BLACK);
   M5.Display.setCursor(0, INFO_DYN_Y);
-  M5.Display.printf("Status:   %s\n", statusString(stalled));
-  M5.Display.printf("RX bytes: %llu\n", totalBytes);
-  M5.Display.printf("Uptime:   %lu sec\n", millis() / 1000);
+  M5.Display.printf("S:%s\n", statusString(stalled));
+  M5.Display.printf("RX:%llu\n", totalBytes);
+  M5.Display.printf("Up:%lus\n", millis() / 1000);
 }
 
 void drawInfoPage() {
@@ -703,61 +724,36 @@ void drawInfoPage() {
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(0, 0);
-  M5.Display.printf("== NTRIP Client FW v%s ==\n\n", FW_VERSION);
-  M5.Display.printf("Host:    %s\n", host);
-  M5.Display.printf("Port:    %d\n", httpPort);
-  M5.Display.printf("Mount:   %s\n", mntpnt);
-  M5.Display.printf("User:    %s\n", user[0] ? user : "(none)");
-  M5.Display.println();
-  M5.Display.printf("WiFi IP: %s\n", WiFi.localIP().toString().c_str());
-  M5.Display.printf("mDNS:    http://%s.local/\n", MDNS_NAME);
-  M5.Display.printf("Tractor: %s\n", TRACTOR_PRESETS[currentTractorIdx].name);
+  M5.Display.printf("NTRIP v%s\n", FW_VERSION);
+  // Truncate host to 18 chars for 128px
+  char hostShort[20];
+  strlcpy(hostShort, host, sizeof(hostShort));
+  M5.Display.printf("H:%s\n", hostShort);
+  M5.Display.printf("P:%d M:%s\n", httpPort, mntpnt);
+  M5.Display.printf("%s\n", WiFi.localIP().toString().c_str());
   refreshInfoDynamic();
   if (updateAvailable) {
     M5.Display.setTextColor(YELLOW, BLACK);
-    M5.Display.setCursor(0, 150);
-    M5.Display.printf(">> Update: v%s available <<", latestVersion.c_str());
+    M5.Display.setCursor(0, 72);
+    M5.Display.printf("Upd v%s!", latestVersion.c_str());
     M5.Display.setTextColor(WHITE, BLACK);
   }
-  // Button labels (B becomes "Update" when newer FW available)
-  M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
-  M5.Display.setTextColor(WHITE, 0x18C3);
-  M5.Display.setCursor(8,   226); M5.Display.print("A: Sky");
-  if (updateAvailable) {
-    M5.Display.setTextColor(YELLOW, 0x18C3);
-    M5.Display.setCursor(110, 226); M5.Display.print("B: Update");
-    M5.Display.setTextColor(WHITE, 0x18C3);
-  } else {
-    M5.Display.setCursor(125, 226); M5.Display.print("B: QR");
-  }
-  M5.Display.setCursor(232, 226); M5.Display.print("C: Sleep");
-  M5.Display.setTextColor(WHITE, BLACK);
+  drawNavBar(updateAvailable ? "Tap:Sky  Hold:OTA" : "Tap:Sky  Hold:Slp");
   renderTractor();
 }
 
-// Reusable button bar for Sky/Graph/QR (A label varies)
-static void drawNavBar(const char* aLabel, const char* bLabel) {
-  M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
-  M5.Display.setTextColor(WHITE, 0x18C3);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(8,   226); M5.Display.print(aLabel);
-  M5.Display.setCursor(125, 226); M5.Display.print(bLabel);
-  M5.Display.setCursor(232, 226); M5.Display.print("C: Sleep");
-  M5.Display.setTextColor(WHITE, BLACK);
-}
-
 // ---------- Sky page ----------
-static const int SKY_CX = 160;
-static const int SKY_CY = 110;
-static const int SKY_R  = 95;
+static const int SKY_CX = 64;
+static const int SKY_CY = 56;
+static const int SKY_R  = 48;
 
 static uint16_t constellationColor(uint8_t cons) {
   switch (cons) {
-    case 0: return WHITE;                // GPS
-    case 1: return TFT_RED;              // GLONASS
-    case 2: return TFT_CYAN;             // Galileo
-    case 3: return TFT_YELLOW;           // BeiDou
-    case 4: return TFT_MAGENTA;          // QZSS
+    case 0: return WHITE;
+    case 1: return TFT_RED;
+    case 2: return TFT_CYAN;
+    case 3: return TFT_YELLOW;
+    case 4: return TFT_MAGENTA;
     default: return TFT_LIGHTGREY;
   }
 }
@@ -781,14 +777,14 @@ static void drawSkyGrid() {
   M5.Display.drawLine(SKY_CX, SKY_CY - SKY_R, SKY_CX, SKY_CY + SKY_R, TFT_DARKGREY);
   M5.Display.setTextColor(TFT_DARKGREY, BLACK);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(SKY_CX - 3,        SKY_CY - SKY_R - 10); M5.Display.print("N");
-  M5.Display.setCursor(SKY_CX + SKY_R + 3, SKY_CY - 3);          M5.Display.print("E");
-  M5.Display.setCursor(SKY_CX - 3,        SKY_CY + SKY_R + 3);  M5.Display.print("S");
-  M5.Display.setCursor(SKY_CX - SKY_R - 8, SKY_CY - 3);          M5.Display.print("W");
+  M5.Display.setCursor(SKY_CX - 3,         SKY_CY - SKY_R - 8); M5.Display.print("N");
+  M5.Display.setCursor(SKY_CX + SKY_R + 1, SKY_CY - 3);          M5.Display.print("E");
+  M5.Display.setCursor(SKY_CX - 3,         SKY_CY + SKY_R + 1);  M5.Display.print("S");
+  M5.Display.setCursor(SKY_CX - SKY_R - 6, SKY_CY - 3);          M5.Display.print("W");
 }
 
 static void plotSats() {
-  int counts[5][2] = {0};   // [cons][0=visible, 1=tracked]
+  int counts[5][2] = {0};
   int snrSum = 0, snrCount = 0;
   for (int i = 0; i < satCount; i++) {
     SatInfo &s = sats[i];
@@ -802,30 +798,23 @@ static void plotSats() {
     int x = SKY_CX + (int)(r * cosf(a));
     int y = SKY_CY + (int)(r * sinf(a));
     uint16_t col = constellationColor(s.cons);
-    int size = 2 + s.snr / 12;        // SNR-driven dot size
-    if (size > 6) size = 6;
+    int size = 1 + s.snr / 18;
+    if (size > 3) size = 3;
     if (s.snr > 0) M5.Display.fillCircle(x, y, size, col);
-    else           M5.Display.drawCircle(x, y, 3,    col);
+    else           M5.Display.drawCircle(x, y, 2,    col);
     if (s.snr > 0) { snrSum += s.snr; snrCount++; }
-    // PRN label
-    M5.Display.setTextColor(col, BLACK);
-    M5.Display.setTextSize(1);
-    M5.Display.setCursor(x + size + 1, y - 3);
-    M5.Display.print(s.prn);
   }
-  // Summary line at y=200
   M5.Display.setTextSize(1);
-  M5.Display.fillRect(0, 200, 320, 16, BLACK);
-  M5.Display.setCursor(0, 202);
-  int xpos = 0;
+  M5.Display.fillRect(0, 108, LCD_W, 10, BLACK);
+  M5.Display.setCursor(0, 108);
   for (int c = 0; c < 5; c++) {
     if (counts[c][0] == 0) continue;
     M5.Display.setTextColor(constellationColor(c), BLACK);
-    M5.Display.printf("%s:%d/%d ", constellationLabel(c), counts[c][1], counts[c][0]);
+    M5.Display.printf("%s%d ", constellationLabel(c), counts[c][1]);
   }
   if (snrCount > 0) {
     M5.Display.setTextColor(WHITE, BLACK);
-    M5.Display.printf(" avg %d", snrSum / snrCount);
+    M5.Display.printf("a%d", snrSum / snrCount);
   }
 }
 
@@ -833,31 +822,30 @@ void drawSkyPage() {
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 0);
   if (satCount == 0) {
-    M5.Display.println("Sky plot");
-    M5.Display.println();
+    M5.Display.setCursor(0, 0);
+    M5.Display.println("Sky");
     M5.Display.setTextColor(TFT_DARKGREY, BLACK);
-    M5.Display.setCursor(40, SKY_CY);
-    M5.Display.print("(waiting for NMEA on RX2...)");
+    M5.Display.setCursor(0, SKY_CY);
+    M5.Display.print("waiting NMEA...");
     M5.Display.setTextColor(WHITE, BLACK);
   } else {
     drawSkyGrid();
     plotSats();
   }
-  drawNavBar("A: Graph", updateAvailable ? "B: Update" : "B: QR");
+  drawNavBar("Tap:Graph Hold:Slp");
 }
 
 void refreshSkyPage() {
-  M5.Display.fillRect(0, 0, 320, 220, BLACK);
+  M5.Display.fillRect(0, 0, LCD_W, NAV_Y, BLACK);
   if (satCount == 0) {
     M5.Display.setTextColor(WHITE, BLACK);
     M5.Display.setTextSize(1);
     M5.Display.setCursor(0, 0);
-    M5.Display.println("Sky plot");
+    M5.Display.println("Sky");
     M5.Display.setTextColor(TFT_DARKGREY, BLACK);
-    M5.Display.setCursor(40, SKY_CY);
-    M5.Display.print("(waiting for NMEA on RX2...)");
+    M5.Display.setCursor(0, SKY_CY);
+    M5.Display.print("waiting NMEA...");
     M5.Display.setTextColor(WHITE, BLACK);
   } else {
     drawSkyGrid();
@@ -871,115 +859,98 @@ void drawGraphPage() {
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(0, 0);
-  M5.Display.println("RX bytes per 5min  (last 1h)");
+  M5.Display.println("RX/5m (1h)");
 
-  // Find max for scaling
   uint32_t mx = 1;
   for (int i = 0; i < BUCKET_COUNT; i++) if (rxBuckets[i] > mx) mx = rxBuckets[i];
 
-  const int gx = 30, gy = 30, gw = 280, gh = 160;
+  const int gx = 20, gy = 14, gw = 104, gh = 80;
   M5.Display.drawLine(gx, gy, gx, gy + gh, WHITE);
   M5.Display.drawLine(gx, gy + gh, gx + gw, gy + gh, WHITE);
 
   int bw = gw / BUCKET_COUNT;
-  // Bars: oldest at left, current at right.
   for (int i = 0; i < BUCKET_COUNT; i++) {
-    int idx = (bucketHead + 1 + i) % BUCKET_COUNT;  // oldest first
+    int idx = (bucketHead + 1 + i) % BUCKET_COUNT;
     int h = (int)((uint64_t)rxBuckets[idx] * gh / mx);
-    int x = gx + 2 + i * bw;
+    int x = gx + 1 + i * bw;
     bool current = (idx == bucketHead);
-    M5.Display.fillRect(x, gy + gh - h, bw - 2, h, current ? TFT_YELLOW : TFT_GREEN);
+    M5.Display.fillRect(x, gy + gh - h, bw - 1, h, current ? TFT_YELLOW : TFT_GREEN);
   }
 
-  // Y-axis max label
   M5.Display.setCursor(0, gy);
   M5.Display.printf("%lu", (unsigned long)mx);
   M5.Display.setCursor(0, gy + gh - 8);
   M5.Display.print("0");
-
-  // X-axis labels
-  M5.Display.setCursor(gx, gy + gh + 4);
+  M5.Display.setCursor(gx, gy + gh + 2);
   M5.Display.print("-1h");
-  M5.Display.setCursor(gx + gw - 18, gy + gh + 4);
+  M5.Display.setCursor(gx + gw - 18, gy + gh + 2);
   M5.Display.print("now");
 
-  drawNavBar("A: Info", updateAvailable ? "B: Update" : "B: QR");
+  drawNavBar("Tap:QR  Hold:Slp");
 }
 
-void drawUpdateConfirmPage() {
-  M5.Display.fillScreen(BLACK);
-  M5.Display.setTextColor(YELLOW, BLACK);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(0, 20);
-  M5.Display.println(" Firmware Update");
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(WHITE, BLACK);
-  M5.Display.setCursor(0, 60);
-  M5.Display.printf(" Current: v%s\n", FW_VERSION);
-  M5.Display.printf(" Latest:  v%s\n", latestVersion.c_str());
-  M5.Display.setCursor(0, 100);
-  M5.Display.println(" Download from GitHub and");
-  M5.Display.println(" flash. Device will restart.");
-  M5.Display.setCursor(0, 150);
-  M5.Display.setTextSize(2);
-  M5.Display.println(" Proceed?");
-  // Button labels
-  M5.Display.fillRect(0, 220, 320, 20, 0x18C3);
-  M5.Display.setTextColor(WHITE, 0x18C3);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(20,  226); M5.Display.print("A: NO");
-  M5.Display.setCursor(220, 226); M5.Display.print("C: YES");
-  M5.Display.setTextColor(WHITE, BLACK);
-}
-
-void drawUpdatingPage() {
-  M5.Display.fillScreen(BLACK);
-  M5.Display.setTextColor(YELLOW, BLACK);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(0, 20);
-  M5.Display.println(" Updating...");
-  M5.Display.setTextColor(WHITE, BLACK);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 60);
-  M5.Display.printf(" Downloading v%s\n", latestVersion.c_str());
-  M5.Display.setCursor(0, 80);
-  M5.Display.printf(" %s\n", FW_BIN_NAME);
-}
-
-void refreshUpdatingPage() {
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(80, 110);
-  M5.Display.setTextColor(YELLOW, BLACK);
-  M5.Display.printf("%3d%%   ", otaProgress);
-  M5.Display.setTextColor(WHITE, BLACK);
-  // progress bar
-  M5.Display.drawRect(20, 160, 280, 16, WHITE);
-  int w = (280 - 2) * otaProgress / 100;
-  M5.Display.fillRect(21, 161, w, 14, YELLOW);
-  M5.Display.fillRect(21 + w, 161, 280 - 2 - w, 14, BLACK);
-  if (otaState == OTA_FAILED) {
-    M5.Display.setTextSize(1);
-    M5.Display.setTextColor(RED, BLACK);
-    M5.Display.setCursor(0, 200);
-    M5.Display.printf(" FAILED: %s        ", otaError.c_str());
-    M5.Display.setTextColor(WHITE, BLACK);
-  }
-}
-
+// ---------- QR page ----------
 void drawQrPage() {
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(0, 0);
-  M5.Display.println("Scan to open config page:");
+  M5.Display.println("Scan to configure:");
 
   String url = String("http://") + MDNS_NAME + ".local/";
-  M5.Display.qrcode(url.c_str(), 70, 18, 180, 3);
+  M5.Display.qrcode(url.c_str(), 24, 12, 92, 3);
 
-  M5.Display.setCursor(0, 205);
-  M5.Display.print(url);
+  drawNavBar("Tap:Info Hold:Slp");
+}
 
-  drawNavBar("A: Info", updateAvailable ? "B: Update" : "B: Info");
+// ---------- Update confirm/updating ----------
+void drawUpdateConfirmPage() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(0, 4);
+  M5.Display.println("FW Update");
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 24);
+  M5.Display.printf("Cur:v%s\n", FW_VERSION);
+  M5.Display.printf("New:v%s\n", latestVersion.c_str());
+  M5.Display.setCursor(0, 56);
+  M5.Display.println("Download &");
+  M5.Display.println("flash. Reboot.");
+  M5.Display.setCursor(0, 88);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.println("Proceed?");
+  drawNavBar("Tap:NO   Hold:YES");
+}
+
+void drawUpdatingPage() {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(0, 4);
+  M5.Display.println("Updating...");
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setCursor(0, 20);
+  M5.Display.printf("v%s\n", latestVersion.c_str());
+}
+
+void refreshUpdatingPage() {
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(34, 50);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.printf("%3d%%", otaProgress);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.drawRect(8, 80, 112, 12, WHITE);
+  int w = (112 - 2) * otaProgress / 100;
+  M5.Display.fillRect(9, 81, w, 10, YELLOW);
+  M5.Display.fillRect(9 + w, 81, 112 - 2 - w, 10, BLACK);
+  if (otaState == OTA_FAILED) {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(RED, BLACK);
+    M5.Display.setCursor(0, 100);
+    M5.Display.printf("FAIL:%s        ", otaError.c_str());
+    M5.Display.setTextColor(WHITE, BLACK);
+  }
 }
 
 void redrawCurrentPage() {
@@ -1006,46 +977,55 @@ void wakeDisplay() {
   redrawCurrentPage();
 }
 
+// ---------- Single-button handling ----------
+// short press: cycle Info -> Sky -> Graph -> QR -> Info (skipping update pages)
+// long press : toggle sleep / on Update Confirm = YES, on Info with updateAvailable = enter confirm
 void handleButtons() {
-  // No buttons during OTA
   if (currentPage == PAGE_UPDATING) return;
 
   if (M5.BtnA.wasPressed()) {
-    if (displayAsleep) { wakeDisplay(); return; }
-    if (currentPage == PAGE_UPDATE_CONFIRM) {     // NO -> back to Info
-      currentPage = PAGE_INFO;
-    } else {
-      // Cycle Info -> Sky -> Graph -> Info (skipping QR and special pages)
-      switch (currentPage) {
-        case PAGE_INFO:  currentPage = PAGE_SKY;   break;
-        case PAGE_SKY:   currentPage = PAGE_GRAPH; break;
-        case PAGE_GRAPH: currentPage = PAGE_INFO;  break;
-        default:         currentPage = PAGE_INFO;  break;     // from QR
-      }
-    }
-    redrawCurrentPage();
+    btnDown      = true;
+    btnDownAt    = millis();
+    btnLongFired = false;
   }
-  if (M5.BtnB.wasPressed()) {
+
+  if (btnDown && !btnLongFired && (millis() - btnDownAt >= BTN_LONG_MS)) {
+    btnLongFired = true;
+    // Long press fires on hold threshold
     if (displayAsleep) { wakeDisplay(); return; }
     if (currentPage == PAGE_UPDATE_CONFIRM) {
-      // B is no-op on confirm
-    } else if (updateAvailable) {
-      currentPage = PAGE_UPDATE_CONFIRM;
-      redrawCurrentPage();
-    } else {
-      currentPage = (currentPage == PAGE_QR) ? PAGE_INFO : PAGE_QR;
-      redrawCurrentPage();
-    }
-  }
-  if (M5.BtnC.wasPressed()) {
-    if (displayAsleep) { wakeDisplay(); return; }
-    if (currentPage == PAGE_UPDATE_CONFIRM) {     // YES -> start OTA
+      // YES -> start OTA
       otaState = OTA_PENDING;
       currentPage = PAGE_UPDATING;
+      redrawCurrentPage();
+    } else if (currentPage == PAGE_INFO && updateAvailable) {
+      // Long press on Info with update available -> open confirm
+      currentPage = PAGE_UPDATE_CONFIRM;
       redrawCurrentPage();
     } else {
       sleepDisplay();
     }
+  }
+
+  if (M5.BtnA.wasReleased()) {
+    bool wasLong = btnLongFired;
+    btnDown      = false;
+    btnLongFired = false;
+    if (wasLong) return;  // long press already handled
+    if (displayAsleep) { wakeDisplay(); return; }
+
+    if (currentPage == PAGE_UPDATE_CONFIRM) {
+      currentPage = PAGE_INFO;          // short = NO
+    } else {
+      switch (currentPage) {
+        case PAGE_INFO:  currentPage = PAGE_SKY;   break;
+        case PAGE_SKY:   currentPage = PAGE_GRAPH; break;
+        case PAGE_GRAPH: currentPage = PAGE_QR;    break;
+        case PAGE_QR:    currentPage = PAGE_INFO;  break;
+        default:         currentPage = PAGE_INFO;  break;
+      }
+    }
+    redrawCurrentPage();
   }
 }
 
@@ -1070,10 +1050,10 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
-  Serial2.begin(uart_bps, SERIAL_8N1, 16, 17);
+  Serial2.begin(uart_bps, SERIAL_8N1, RS232_RX_PIN, RS232_TX_PIN);
   initTractor();
 
-  Serial.printf("NTRIP Client FW v%s\n", FW_VERSION);
+  Serial.printf("NTRIP Client (AtomS3) FW v%s\n", FW_VERSION);
   loadSettings();
   setupWiFi();
   setupWeb();
@@ -1093,7 +1073,7 @@ void loop() {
       drawUpdatingPage();
     }
     refreshUpdatingPage();
-    runOta();      // blocks; restarts on success
+    runOta();
     refreshUpdatingPage();
     return;
   }
@@ -1111,7 +1091,6 @@ void loop() {
   }
   Serial2.flush();
 
-  // NMEA from the receiver on Serial2 RX (pin 16)
   while (Serial2.available()) {
     processNmeaChar(Serial2.read());
   }
@@ -1140,7 +1119,7 @@ void loop() {
     bool receiving = (ntripState == NS_OK) && !stalled;
     if (receiving) {
       tractorX += TRACTOR_SPEED;
-      if (tractorX > (int)M5.Display.width()) tractorX = -TRACTOR_W;
+      if (tractorX > LCD_W) tractorX = -TRACTOR_W;
       renderTractor();
     }
   }
@@ -1155,7 +1134,7 @@ void loop() {
       switch (currentPage) {
         case PAGE_INFO:  refreshInfoDynamic(); break;
         case PAGE_SKY:   refreshSkyPage();    break;
-        case PAGE_GRAPH: drawGraphPage();     break;  // full redraw is cheap enough
+        case PAGE_GRAPH: drawGraphPage();     break;
         default: break;
       }
     }

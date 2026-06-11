@@ -43,7 +43,7 @@ void hsvToRgb(uint8_t h, uint8_t s, uint8_t v, uint8_t &r, uint8_t &g, uint8_t &
 }
 
 void setLed(uint8_t r, uint8_t g, uint8_t b) {
-  M5.dis.drawpix(0, (CRGB){r, g, b});
+  M5.Led.setColor(0, r, g, b);
 }
 
 void setLedRainbow() {

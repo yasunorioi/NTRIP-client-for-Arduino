@@ -93,7 +93,7 @@ class node_caster,node_wifi,node_gnss,node_serial2 toneRose
 
 ## Examples
 
-4 combinations of hardware and WiFi configuration method:
+5 combinations of hardware and WiFi configuration method:
 
 | Example | Hardware | WiFi Config | RS232 Port |
 |---------|----------|-------------|------------|
@@ -101,11 +101,13 @@ class node_caster,node_wifi,node_gnss,node_serial2 toneRose
 | `M5Stack_WiFiManager` | M5Stack + RS232 Kit | WiFiManager (captive portal) | Serial2 (TX=17, RX=16) |
 | `M5Atom_WPS` | M5Atom + Atomic RS232 Base | WPS | Serial2 (TX=19, RX=22) |
 | `M5Atom_WiFiManager` | M5Atom + Atomic RS232 Base | WiFiManager (captive portal) | Serial2 (TX=19, RX=22) |
+| `AtomS3_WiFiManager` | M5 AtomS3 + Atom RS232 Base | WiFiManager (captive portal) | Serial2 (TX=G6, RX=G5) |
 
 ### Hardware
 
 - **M5Stack + RS232 Kit**: [M5Stack RS232 Module](https://shop.m5stack.com/products/rs232-module-13-2) via I2C port. LCD display shows NTRIP status and data rate.
 - **M5Atom + Atomic RS232 Base**: [Atomic RS232 Kit](https://shop.m5stack.com/collections/m5-atom/products/atom-rs232-kit). LED color indicates active NTRIP server.
+- **M5 AtomS3 + Atom RS232 Base**: [Atomic RS232 Base](https://shop.m5stack.com/products/atomic-rs232-base) with AtomS3 host. 128x128 LCD shows Info / Sky / Graph / QR pages (cycled by tap, hold to sleep). Build with `PartitionScheme=default_8MB` (or `min_spiffs`) to fit the binary with OTA.
 
 ![M5Atom + Atomic RS232 Base](https://user-images.githubusercontent.com/6777579/127084970-9d954f52-c155-42cb-a9d0-1e72e5324804.png)
 
@@ -130,13 +132,29 @@ Edit `eniwa-agriICT.h` (WPS/M5Stack examples) or the inline config in the .ino f
 arduino-cli lib install --git-url https://github.com/yasunorioi/NTRIP-client-for-Arduino.git
 ```
 
+### PlatformIO
+
+Each example folder ships its own `platformio.ini` and resolves library dependencies
+automatically (including this library via `symlink://../..`). Build and upload:
+
+```bash
+cd examples/AtomS3_WiFiManager     # or any other example
+pio run                            # build only
+pio run -t upload                  # build + flash over USB
+pio device monitor                 # serial monitor at 115200
+```
+
+All 5 examples have been compile-tested against ESP32 Arduino 3.x
+(`espressif32` platform with `esp32async/AsyncTCP` + `esp32async/ESPAsyncWebServer`).
+
 ### Dependencies
 
 | Library | Required by |
 |---------|-------------|
-| [M5Stack](https://github.com/m5stack/M5Stack) | M5Stack examples |
-| [M5Atom](https://github.com/m5stack/M5Atom) | M5Atom examples |
+| [M5Unified](https://github.com/m5stack/M5Unified) | all examples |
 | [WiFiManager](https://github.com/tzapu/WiFiManager) | WiFiManager examples |
+| [AsyncTCP](https://github.com/esp32async/AsyncTCP) | WiFiManager examples (web UI) |
+| [ESPAsyncWebServer](https://github.com/esp32async/ESPAsyncWebServer) | WiFiManager examples (web UI) |
 
 ## Misc
 
