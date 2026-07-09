@@ -200,6 +200,7 @@ void setupWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    WiFi.setSleep(false);   // モデムスリープOFF: NTRIP常時受信の取りこぼし/切断を抑制
     Serial.print("WiFi connected: ");
     Serial.println(WiFi.localIP());
     M5.Display.print("IP:");
