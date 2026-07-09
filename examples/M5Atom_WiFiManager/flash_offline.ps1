@@ -1,4 +1,4 @@
-# flash_offline.ps1 -- WiFiManager 例をオフラインで書き込む (機種非依存)
+﻿# flash_offline.ps1 -- WiFiManager 例をオフラインで書き込む (機種非依存)
 # ビルド済み firmware.factory.bin を 0x0 に一発で焼く。ネット不要。
 # .pio/build 下のビルドフォルダを自動検出、chip は esptool 自動判定。
 # 使い方 (このスクリプトがある example ディレクトリで実行):
@@ -14,6 +14,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# esptool の進捗バー(░ 等の罫線文字)を旧コンソール(CP932)に出す際の
+# UnicodeEncodeError を防ぐため、子プロセスの stdout/stderr を UTF-8 に固定する。
+$env:PYTHONIOENCODING = "utf-8"
 $py = "C:\Users\kita_\.platformio\penv\Scripts\python.exe"
 
 # --- ビルドフォルダ自動検出 (.pio/build/<env>/firmware.factory.bin) ---
@@ -43,9 +46,9 @@ if (-not $Port) {
     Write-Host "検出: $($cands[0].Name)" -ForegroundColor Green
 }
 
-$before = if ($NoReset) { "no_reset" } else { "default_reset" }
+$before = if ($NoReset) { "no-reset" } else { "default-reset" }
 Write-Host "書き込み: $Port @ $Baud baud -> 0x0 (--before $before, chip=auto)" -ForegroundColor Cyan
-& $py -m esptool --port $Port --baud $Baud --before $before --after hard_reset write-flash 0x0 $bin.FullName
+& $py -m esptool --port $Port --baud $Baud --before $before --after hard-reset write-flash 0x0 $bin.FullName
 if ($LASTEXITCODE -ne 0) {
     Write-Host "失敗。順に試す:" -ForegroundColor Yellow
     Write-Host "  1) 速度を落とす      : .\flash_offline.ps1 -Port $Port -Baud 115200"
